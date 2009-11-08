@@ -55,5 +55,5 @@ for i in range(len(tests)):
 	test = tests[(t+i)%len(tests)]
 	test(N)
 	elapsed = (time.time() - start)
-	print("%s: pages/sec: %.2f (in %.2f seconds)" % (test.__name__, (N/elapsed), elapsed))
+	print("%s: %.2f pages/sec (in %.2f seconds)" % (test.__name__, (N/elapsed), elapsed))
 
