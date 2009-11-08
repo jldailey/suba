@@ -1,0 +1,6 @@
+%(def row(name):)
+	<li class='name'>%(name)</li>
+%/
+%(for name in names:)
+	%(row(name))
+%/

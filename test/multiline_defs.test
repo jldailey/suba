@@ -1,0 +1,6 @@
+%(def gen(name):
+	for c in name:
+		yield c)
+%(for name in names:)
+	%(gen(name)),
+%/

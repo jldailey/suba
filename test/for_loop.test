@@ -1,0 +1,5 @@
+<ul>
+%(for item in ['a','b','c']:)
+	<li>%(item)</li>
+%/
+</ul>
