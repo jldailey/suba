@@ -1,0 +1,6 @@
+This is line 1.
+This is line 2.
+%( for name in names: # this line has an extra 'space' at the beginning
+	yield name)
+
+	

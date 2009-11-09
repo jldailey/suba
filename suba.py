@@ -184,7 +184,6 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 			c += 1
 		lineno = 1 # we keep track of this as best we can, so that stack trace rendering works
 		for c in range(len(chunks)):
-			# print("cursor: %s" % len(cursor))
 			chunk = chunks[c]
 			if len(chunk) == 0: continue
 			# print("chunk: %s" % repr(chunk))
@@ -208,7 +207,16 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 						cursor[-1] = cursor[-2][-1].orelse
 						eval_part = eval_part[2:] # and add the if statement
 						do_descend = True
-					node = ast.parse(eval_part).body[0]
+					try:
+						node = ast.parse(eval_part).body[0]
+					except IndentationError as e: # fix up indentation errors to make sure they indicate the right spot in the actual template file
+						e.filename = filename
+						e.lineno += lineno - eval_part.count("\n")
+						e.offset += 2 # should be 2 + (space between left margin and opening %), but i dont know how to count this atm
+						raise
+					except Exception as e:
+						print("Error while parsing sub-expression: %s" % (eval_part))
+						raise e
 					for child in ast.walk(node):
 						child.lineno = lineno
 						# print("setting lineno %d: %s" % (lineno, ast.dump(child)))
@@ -238,7 +246,9 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		# print(ast.dump(head))
 		# sys.exit(0)
 		# print("compiling.")
-		co = compile(head,filename if filename is not None else "template_%d" % text.__hash__(),"exec")
+		if filename is None:
+			filename = "template_%d" % text.__hash__()
+		co = compile(head,filename,"exec")
 		_code_cache[h] = co
 
 	## Execution Phase ##
