@@ -28,8 +28,9 @@ def match_forward(text, find, against, start=0, stop=-1):
 	return -1
 
 class TemplateTransformer(ast.NodeTransformer):
-	def __init__(self, stripWhitespace=False, encoding=None, locals=None):
+	def __init__(self, base_path=".", stripWhitespace=False, encoding=None, locals=None):
 		ast.NodeTransformer.__init__(self)
+		self.base_path = base_path
 		self.seenStore = {}
 		self.seenFuncs = {}
 		self.encoding = encoding
@@ -40,6 +41,16 @@ class TemplateTransformer(ast.NodeTransformer):
 			node.value = Yield(value=node.value)
 		# print("visit_Yield: %s" % str(ast.dump(node.value)))
 		# print("stripping whitespace...", self.stripWhitespace and type(node.value.value) == Str)
+		# print("type(node.value.value) %s" % str(type(node.value.value)))
+		# try: 
+			# print("type(node.value.value.func) %s" % str(type(node.value.value.func)))
+			# print("type(node.value.value.func.id) %s" % str(node.value.value.func.id))
+		# except AttributeError:
+			# pass
+		# try: 
+			# print("type(node.value.value.func.value) %s" % str(type(node.value.value.func.value)))
+		# except AttributeError:
+			# pass
 		if type(node.value.value) == Str:
 			if self.stripWhitespace:
 				s = strip_whitespace(node.value.value.s)
@@ -49,12 +60,21 @@ class TemplateTransformer(ast.NodeTransformer):
 				else:
 					# print("setting new value")
 					node.value.value.s = s
+		elif type(node.value.value) == Call and type(node.value.value.func) is Name and self.seenFuncs.get(node.value.value.func.id, None) is not None:
+			# print("Not wrapping local function")
+			pass
 		else: # any yield that isn't yielding a string already, gets wrapped to produce one
+			# print("Wrapping expresion with str()")
 			node.value.value = Call(func=Name(id='str', ctx=Load()), args=[node.value.value], keywords=[], starargs=None, kwargs=None)
 		self.generic_visit(node.value)
 		return node
 	def visit_FunctionDef(self, node):
 		# print("remembering function %s" % node.name)
+		# multiple includes of the same file can cause it's generator function to be inlined in the ast more than once
+		# so let's filter those out
+		if self.seenFuncs.get(node.name, False) is True:
+			# print("Discarding duplicate FunctionDef: %s" % node.name)
+			return None
 		self.seenFuncs[node.name] = True
 		for arg in node.args.args:
 			# print("remembering argument %s" % arg.arg)
@@ -82,7 +102,7 @@ class TemplateTransformer(ast.NodeTransformer):
 			try:
 				self.locals.index(node.id)
 			except ValueError: # if it's not one of the pre-defined locals
-				if __builtins__.get(node.id,None) is None and self.seenFuncs.get(node.id,None) is None:
+				if node.id is not 'args' and __builtins__.get(node.id,None) is None and self.seenFuncs.get(node.id,None) is None:
 					return Subscript( # replace the variable with a reference to args['...']
 						value=Name(id='args', ctx=Load()),
 					slice=Index(value=Str(s=node.id)), ctx=node.ctx)
@@ -102,14 +122,10 @@ def strip_whitespace(s):
 		if not remove:
 			out.write(c)
 	return out.getvalue()
-	
 
 _code_cache = {}
 _include_cache = {}
-def include(filename, base_path):
-	if _include_cache.get(filename,None) is None:
-		_include_cache[filename] = strip_whitespace(open(os.path.sep.join(base_path + [filename])).read())
-	return _include_cache[filename]
+_mtime_cache = {}
 
 def buffered(gen):
 	return ''.join(gen)
@@ -146,106 +162,152 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		'<ul><li>John</li><li>Paul</li><li>Ringo</li></ul>'
 	"""
 
+	base_path = base_path.split(os.path.sep)
+
 	if text is None and filename is not None:
 		h = filename.__hash__()
+		filename = os.path.sep.join(base_path + [filename])
 	elif filename is None and text is not None:
 		h = text.__hash__()
 	else:
 		raise ArgumentError("template() requires either text= or filename= arguments.")
-	base_path = base_path.split(os.path.sep)
 	
 	## Compile Phase ##
 	# note about performance: compiling time is one-time only, so on scale it matters very very little.
 	# what matters is the execution of the generated code.
 	# absolutely anything that can be done to manipulate the generated AST to save execution time should be done.
-	if _code_cache.get(h, None) is None:
+	if _code_cache.get(h, None) is None\
+		or (filename is not None and _mtime_cache.get(filename,0) < os.path.getmtime(filename)):
 		if filename is not None:
-			text = open(os.path.sep.join(base_path + [filename]), "rb").read()
+			text = open(filename, "rb").read()
 		if type(text) is bytes:
 			text = str(text, encoding)
-		head = Module(body=[ # build the first node of the new code tree
-			FunctionDef(name='execute', args=arguments(args=[], vararg=None, varargannotation=None, kwonlyargs=[], kwarg='args', kwargannotation=None, defaults=[], kw_defaults=[]), 
-				body=[], decorator_list=[], returns=None),
-			])
-		# point a cursor into the tree where we will build from
-		# the cursor is a stack, so cursor[-1] is the current location
-		cursor = []
-		cursor.append(head.body[0].body)
-		# split up the text into chunks
-		chunks = text.split('%')
-		c = 0
-		while True:
-			if c >= len(chunks) - 1: break # force re-eval of len()
-			chunka = chunks[c]
-			chunkb = chunks[c + 1]
-			if chunkb[0] not in ('(','/'):
-				chunks[c] = chunka + '%' + chunkb
-				del chunks[c+1]
-			c += 1
-		lineno = 1 # we keep track of this as best we can, so that stack trace rendering works
-		for c in range(len(chunks)):
-			chunk = chunks[c]
-			if len(chunk) == 0: continue
-			# print("chunk: %s" % repr(chunk))
-			if chunk[0] == '(':
-				i = match_forward(chunk, ')', '(', start=1)
-				# if we found a matched parentheses group %(...)...
-				# then eval the middle, and yield the left overs
-				if i == -1:
-					raise TemplateFormatError("Unmatched '%%(' in template, beginning at: '%s'" % (chunk[0:15]))
-				eval_part = chunk[1:i]
-				text_part = chunk[i+1:]
-				do_descend = False
-				if eval_part.endswith(":"): # if the statement to eval is like an if, while, or for, then we need to do some tricks
-					eval_part += " pass" # add a temp. node, so we can parse the incomplete statement
-					do_descend = True
-				if eval_part.startswith("else:"):
-					# for an else statement, just move the cursor back and over to the orelse block
-					cursor[-1] = cursor[-2][-1].orelse
-				else:
-					if eval_part.startswith("elif "):
-						cursor[-1] = cursor[-2][-1].orelse
-						eval_part = eval_part[2:] # and add the if statement
-						do_descend = True
-					try:
-						node = ast.parse(eval_part).body[0]
-					except IndentationError as e: # fix up indentation errors to make sure they indicate the right spot in the actual template file
-						e.filename = filename
-						e.lineno += lineno - eval_part.count("\n")
-						e.offset += 2 # should be 2 + (space between left margin and opening %), but i dont know how to count this atm
-						raise
-					except Exception as e:
-						print("Error while parsing sub-expression: %s" % (eval_part))
-						raise e
-					for child in ast.walk(node):
-						child.lineno = lineno
-						# print("setting lineno %d: %s" % (lineno, ast.dump(child)))
-					cursor[-1].append(node) # parse the body of the %( ... ) group
-					# print("%s => %s" % (eval_part, ast.dump(ast.parse(eval_part).body[0])))
-					if do_descend: # adjust the cursor is needed
-						del cursor[-1][-1].body[0] # clear the temp. node from this new block
-						cursor.append(cursor[-1][-1].body) # and point our cursor inside the new block
-				if len(text_part): # if there is left over text after the %( ... ) block, yield it out.
-					cursor[-1].append(Expr(value=Yield(value=Str(s=text_part, lineno=lineno), lineno=lineno), lineno=lineno))
-			elif chunk[0] == '/': # process a %/ block terminator, by decreasing the indent
-				if len(cursor) < 2:
-					raise TemplateFormatError("Too many close tags %/")
-				# pop the right side off the cursor stack
-				cursor = cursor[:-1]
-				if len(chunk) > 1:
-					cursor[-1].append(Expr(value=Yield(value=Str(s=chunk[1:], lineno=lineno), lineno=lineno), lineno=lineno))
-			else:
-				cursor[-1].append(Expr(value=Yield(value=Str(
-					s=("%"+chunk) if c > 0 else chunk, lineno=lineno), lineno=lineno), lineno=lineno))
-			lineno += chunk.count("\n")
 
-		# patch up the generated tree, to reference the keyword arguments when necessary
-		head = TemplateTransformer(stripWhitespace, encoding, ('include',)).visit(head)
-		# patch up all the book-keeping of indents and such
+		# as the generator returns nodes, it indicates how the cursor should advance
+		NO_MOTION = 0 # similar to a line that ends with ;
+		DESCEND = 1  # like an if:, for:
+		ELSE_DESCEND = 2 # like an else:
+		ELIF_DESCEND = 3 # like an elif:
+		UNDESCEND = 4 # any %/
+
+		def generate_ast(text):
+			""" Parses text, yielding [ast node, motion] pairs """
+			lineno = 1
+			mark = 0
+			while mark < len(text):
+				i = text.find('%',mark)
+				# print("i: %d"% i)
+				if i == -1:
+					# print("end of line: %s" % text[mark:])
+					yield Expr(value=Yield(value=Str(s=text[mark:], lineno=lineno), lineno=lineno), lineno=lineno), NO_MOTION
+					mark = len(text)
+				else:
+					lineno += text.count('\n',mark,i)
+					c = text[i+1]
+					if c == '(':
+						end = match_forward(text, ')', '(', start=i+2)
+						if end == -1:
+							raise TemplateFormatError("Unmatched '%%(' in template, beginning at: '%s'" % (text[i:i+15]))
+						text_part = text[mark:i]
+						eval_part = text[i+2:end]
+						node = None
+						motion = NO_MOTION
+						if stripWhitespace:
+							text_part = text_part.replace('\n','').replace('\t','')
+						if len(text_part) > 0:
+							# print("text part: %s" % text_part)
+							yield Expr(value=Yield(value=Str(s=text_part, lineno=lineno), lineno=lineno), lineno=lineno), motion
+						# print("eval part: %s" % eval_part)
+						if eval_part.endswith("else:"):
+							motion = ELSE_DESCEND
+						else:
+							if eval_part.endswith(':'):
+								motion = DESCEND
+								eval_part += " pass"
+							if eval_part.startswith("elif "):
+								motion = ELIF_DESCEND
+								eval_part = eval_part[2:] # chop the 'el' off the front, that part of it is captured by the motion
+							try:
+								node = ast.parse(eval_part).body[0]
+							except Exception as e:
+								e.filename = filename
+								e.lineno += lineno - eval_part.count("\n")
+								e.offset += 2 # should be 2 + (space between left margin and opening %), but i dont know how to count this atm
+								raise
+							for child in ast.walk(node):
+								child.lineno = lineno
+						if type(node) is Expr and type(node.value) is Call and type(node.value.func) is Name \
+							and node.value.func.id is 'include':
+							argf = node.value.args[0].s
+							for node in get_include(argf):
+								# print("about to yield from include: %s" % (ast.dump(node)))
+								yield node, NO_MOTION
+						else:
+							# print("about to yield: %s, %s" % (ast.dump(node), motion))
+							yield node, motion
+						mark = end+1
+					elif c == '/':
+						if i-mark > 0:
+							yield Expr(value=Yield(value=Str(s=text[mark:i], lineno=lineno), lineno=lineno), lineno=lineno), NO_MOTION
+						yield None, UNDESCEND
+						mark = i+2
+					else:
+						yield Expr(value=Yield(value=Str(s=text[mark:i+1], lineno=lineno), lineno=lineno), lineno=lineno), NO_MOTION # +1 so that we include the % that find() found
+						mark = i+1
+
+		def compile_ast(text):
+			head = Module(body=[ # build the first node of the new code tree
+				FunctionDef(name='execute', args=arguments(args=[], vararg=None, varargannotation=None, kwonlyargs=[], kwarg='args', kwargannotation=None, defaults=[], kw_defaults=[]), 
+					body=[], decorator_list=[], returns=None),
+				])
+			cursor = []
+			cursor.append(head.body[0].body) # the body of the first function
+			# read out the results of the generator
+			for node, motion in generate_ast(text):
+				# print("got node,motion: %s, %d" % (ast.dump(node) if node else None, motion))
+
+				# on an else if block, first we side-step, then descend normally
+				if motion is ELIF_DESCEND:
+					cursor[-1] = cursor[-2][-1].orelse
+					motion = DESCEND
+				# all nodes get inserted at the end of the current cursor
+				if node is not None:
+					cursor[-1].append(node)
+				# adjust cursor based on motion yielded
+				if motion is NO_MOTION:
+					pass
+				elif motion is DESCEND:
+					del cursor[-1][-1].body[0]
+					cursor.append(cursor[-1][-1].body)
+				elif motion is ELSE_DESCEND:
+					cursor[-1] = cursor[-2][-1].orelse
+				elif motion is UNDESCEND:
+					if len(cursor) < 2:
+						raise TemplateFormatError("Too many close tags %/")
+					cursor = cursor[:-1]
+			return head
+
+		def get_include(filename):
+			""" Includes are compiled to ast, cached, then inlined into the larger ast. """
+			filename = os.path.sep.join(base_path + [filename])
+			if _include_cache.get(filename, None) is None:
+				# print("Filling include cache: %s" % filename)
+				fundef = compile_ast(open(filename).read()).body[0]
+				# print("Got fundef: %s %s" % (str(fundef), fundef.name))
+				fundef.name = filename.split(os.path.sep)[-1].replace('.','_')
+				# print("Mangled to: %s" % (fundef.name))
+				_include_cache[filename] = [fundef, Expr(value=Call(func=Name(id=fundef.name, ctx=Load()), args=[], keywords=[], starargs=None, kwargs=Name(id='args', ctx=Load())))]
+				# print("Cached as: %s\n%s" % (ast.dump(_include_cache[filename][0]), ast.dump(_include_cache[filename][1])))
+			return _include_cache[filename]
+
+		head = compile_ast(text)
+		# print(ast.dump(head))
+
+		# patch up the generated tree, to reference the keyword arguments when necessary, among other things
+		head = TemplateTransformer(stripWhitespace, encoding).visit(head)
+		# patch up all the book-keeping of indents and such, if any were missed
 		ast.fix_missing_locations(head)
 		# print(ast.dump(head))
-		# sys.exit(0)
-		# print("compiling.")
 		if filename is None:
 			filename = "template_%d" % text.__hash__()
 		co = compile(head,filename,"exec")
@@ -254,8 +316,11 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 	## Execution Phase ##
 	# provide a few global helpers and then execute the cached byte code
 	loc = {}
-	glob = {'include':lambda f: include(f, base_path)}
+	glob = {}
 	exec(_code_cache[h], glob, loc)
 	gen = loc['execute'](**kw)
 	return gen
+
+if __name__ == "__main__":
+	print(''.join(template(text="""Hello %("world")!""")))
 
