@@ -6,7 +6,7 @@
 import re, io, os, ast
 from ast import *
 
-__all__ = ['template']
+__all__ = ['template', 'buffered']
 
 class TemplateFormatError(Exception): pass
 
