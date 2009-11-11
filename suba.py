@@ -102,7 +102,11 @@ class TemplateTransformer(ast.NodeTransformer):
 			try:
 				self.locals.index(node.id)
 			except ValueError: # if it's not one of the pre-defined locals
-				if node.id is not 'args' and __builtins__.get(node.id,None) is None and self.seenFuncs.get(node.id,None) is None:
+				if not hasattr(__builtins__, 'get'):
+					__builtins__.get = __builtins__.__dict__.get
+				if node.id is not 'args' \
+					and __builtins__.get(node.id,None) is None \
+					and self.seenFuncs.get(node.id,None) is None:
 					return Subscript( # replace the variable with a reference to args['...']
 						value=Name(id='args', ctx=Load()),
 					slice=Index(value=Str(s=node.id)), ctx=node.ctx)
@@ -163,10 +167,11 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 	"""
 
 	base_path = base_path.split(os.path.sep)
+	if filename is not None:
+		filename = os.path.sep.join(base_path + [filename])
 
 	if text is None and filename is not None:
 		h = filename.__hash__()
-		filename = os.path.sep.join(base_path + [filename])
 	elif filename is None and text is not None:
 		h = text.__hash__()
 	else:
@@ -176,8 +181,15 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 	# note about performance: compiling time is one-time only, so on scale it matters very very little.
 	# what matters is the execution of the generated code.
 	# absolutely anything that can be done to manipulate the generated AST to save execution time should be done.
-	if _code_cache.get(h, None) is None\
-		or (filename is not None and _mtime_cache.get(filename,0) < os.path.getmtime(filename)):
+	do_compile = False
+	if _code_cache.get(h, None) is None:
+		do_compile = True
+	if filename is not None:
+		mtime = os.path.getmtime(filename)
+		if _mtime_cache.get(filename,0) < mtime:
+			do_compile = True
+			_mtime_cache[filename] = mtime
+	if do_compile:
 		if filename is not None:
 			text = open(filename, "rb").read()
 		if type(text) is bytes:
@@ -307,7 +319,7 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		head = TemplateTransformer(stripWhitespace, encoding).visit(head)
 		# patch up all the book-keeping of indents and such, if any were missed
 		ast.fix_missing_locations(head)
-		# print(ast.dump(head))
+		#print(ast.dump(head))
 		if filename is None:
 			filename = "template_%d" % text.__hash__()
 		co = compile(head,filename,"exec")
@@ -323,4 +335,25 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 
 if __name__ == "__main__":
 	print(''.join(template(text="""Hello %("world")!""")))
+
+	print(''.join(template(filename="bench_suba.tpl", base_path="benchmark", stripWhitespace=True, items = [
+		{'symbol':'USD', 'url': 'http://usd/', 'name': 'U.S.D.', 'price': 1.00, 'change': 0.00, 'ratio': 0.5},
+		{'symbol':'USD', 'url': 'http://usd/', 'name': 'U.S.D.', 'price': 1.00, 'change': 0.00, 'ratio': 0.5},
+		{'symbol':'USD', 'url': 'http://usd/', 'name': 'U.S.D.', 'price': 1.00, 'change': 0.00, 'ratio': 0.5},
+		{'symbol':'USD', 'url': 'http://usd/', 'name': 'U.S.D.', 'price': 1.00, 'change': 0.00, 'ratio': 0.5},
+		{'symbol':'USD', 'url': 'http://usd/', 'name': 'U.S.D.', 'price': 1.00, 'change': 0.00, 'ratio': 0.5},
+		{'symbol':'USD', 'url': 'http://usd/', 'name': 'U.S.D.', 'price': 1.00, 'change': 0.00, 'ratio': 0.5},
+		{'symbol':'USD', 'url': 'http://usd/', 'name': 'U.S.D.', 'price': 1.00, 'change': 0.00, 'ratio': 0.5},
+		{'symbol':'USD', 'url': 'http://usd/', 'name': 'U.S.D.', 'price': 1.00, 'change': 0.00, 'ratio': 0.5},
+		{'symbol':'USD', 'url': 'http://usd/', 'name': 'U.S.D.', 'price': 1.00, 'change': 0.00, 'ratio': 0.5},
+		{'symbol':'USD', 'url': 'http://usd/', 'name': 'U.S.D.', 'price': 1.00, 'change': 0.00, 'ratio': 0.5},
+		{'symbol':'USD', 'url': 'http://usd/', 'name': 'U.S.D.', 'price': 1.00, 'change': 0.00, 'ratio': 0.5},
+		{'symbol':'USD', 'url': 'http://usd/', 'name': 'U.S.D.', 'price': 1.00, 'change': 0.00, 'ratio': 0.5},
+		{'symbol':'USD', 'url': 'http://usd/', 'name': 'U.S.D.', 'price': 1.00, 'change': 0.00, 'ratio': 0.5},
+		{'symbol':'USD', 'url': 'http://usd/', 'name': 'U.S.D.', 'price': 1.00, 'change': 0.00, 'ratio': 0.5},
+		{'symbol':'USD', 'url': 'http://usd/', 'name': 'U.S.D.', 'price': 1.00, 'change': 0.00, 'ratio': 0.5},
+		{'symbol':'USD', 'url': 'http://usd/', 'name': 'U.S.D.', 'price': 1.00, 'change': 0.00, 'ratio': 0.5},
+		{'symbol':'USD', 'url': 'http://usd/', 'name': 'U.S.D.', 'price': 1.00, 'change': 0.00, 'ratio': 0.5},
+		{'symbol':'USD', 'url': 'http://usd/', 'name': 'U.S.D.', 'price': 1.00, 'change': 0.00, 'ratio': 0.5},
+	])))
 
