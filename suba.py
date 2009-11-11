@@ -10,10 +10,6 @@ __all__ = ['template']
 
 class TemplateFormatError(Exception): pass
 
-def gen_bytes(gen, encoding):
-	for item in gen:
-		yield bytes(str(item), encoding)
-
 def match_forward(text, find, against, start=0, stop=-1):
 	count = 1
 	if stop == -1:
