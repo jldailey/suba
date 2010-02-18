@@ -143,6 +143,10 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 
 	if text is None and filename is not None:
 		h = filename.__hash__()
+		try:
+			h += os.path.getmtime(filename)
+		except:
+			pass
 	elif filename is None and text is not None:
 		h = text.__hash__()
 	else:
