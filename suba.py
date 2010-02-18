@@ -3,7 +3,7 @@
 	The AST tree is compiled to bytecode and cached (so only the first run of a template must compile).
 	The bytecode cache is in-memory only.
 """
-import re, io, os, ast
+import re, io, os, ast, builtins
 from ast import *
 
 __all__ = ['template', 'buffered']
@@ -72,7 +72,7 @@ class TemplateTransformer(ast.NodeTransformer):
 			try:
 				self.locals.index(node.id)
 			except ValueError: # if it's not one of the pre-defined locals
-				if __builtins__.get(node.id,None) is None and self.seenFuncs.get(node.id,None) is None:
+				if builtins.__dict__.get(node.id,None) is None and self.seenFuncs.get(node.id,None) is None:
 					return Subscript( # replace the variable with a reference to args['...']
 						value=Name(id='args', ctx=Load()),
 					slice=Index(value=Str(s=node.id)), ctx=node.ctx)
@@ -118,7 +118,8 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 
 		>>> with open("_test_file_", "w") as f:
 		...		f.write("<p>%(name)</p>")
-		>>>	''.join(template(filename="_test_file_", name="Jacob"))
+		14
+		>>> ''.join(template(filename="_test_file_", name="Jacob"))
 		'<p>Jacob</p>'
 		>>> os.unlink("_test_file_")
 		
@@ -130,9 +131,14 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		...	%(for item in items:)
 		...		<li>%(item)</li>
 		...	%/
-		...	</ul>""\", items=["John", "Paul", "Ringo"])).replace('\n','').replace('\t','')
+		...	</ul>""\", items=["John", "Paul", "Ringo"], stripWhitespace=True))
 		...
 		'<ul><li>John</li><li>Paul</li><li>Ringo</li></ul>'
+
+		>>> import datetime
+		>>> ''.join(template(text="now is: %(datetime.datetime.strptime('12/10/2001','%d/%m/%Y').strftime('%d/%m/%y'))", datetime=datetime))
+		'now is: 12/10/01'
+
 	"""
 
 	if text is None and filename is not None:
@@ -170,7 +176,8 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 			if chunkb[0] not in ('(','/'):
 				chunks[c] = chunka + '%' + chunkb
 				del chunks[c+1]
-			c += 1
+			else:
+				c += 1
 		lineno = 1 # we keep track of this as best we can, so that stack trace rendering works
 		for c in range(len(chunks)):
 			chunk = chunks[c]
@@ -181,7 +188,7 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 				# if we found a matched parentheses group %(...)...
 				# then eval the middle, and yield the left overs
 				if i == -1:
-					raise TemplateFormatError("Unmatched '%%(' in template, beginning at: '%s'" % (chunk[0:15]))
+					raise TemplateFormatError("Unmatched '%%(' in template, beginning at: '%s'" % (chunk[0:50]))
 				eval_part = chunk[1:i]
 				text_part = chunk[i+1:]
 				do_descend = False
@@ -248,3 +255,7 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 	gen = loc['execute'](**kw)
 	return gen
 
+
+if __name__ == "__main__":
+	import doctest
+	doctest.testmod()
