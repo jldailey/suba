@@ -154,14 +154,16 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 					# if this eval_part had a type_part attached (a type specifier as recognized by the % operator)
 					# then wrap the node in a call to the % operator with this type specifier
 					if type_part is not None:
-						if type_part == 'q':
+						fq = type_part.find('q')
+						fm = type_part.find('m')
+						if fq > -1:
 							new = _quote(node.value)
 							node = ast.copy_location(new, node.value)
-						elif type_part == 'm':
+						if fm > -1:
 							new = _multiline(node.value)
 							node = ast.copy_location(new, node.value)
-						else:
-							new = Expr(value=BinOp(left=Str(s='%'+type_part, lineno=lineno), op=Mod(lineno=lineno), right=node.value, lineno=lineno), lineno=lineno)
+						if fq == -1 and fm == -1:
+							new = Expr(value=BinOp(left=Str(s='%'+type_part), op=Mod(), right=node.value))
 							node = ast.copy_location(new, node.value)
 
 					# put our new node into the ast tree
