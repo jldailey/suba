@@ -108,6 +108,17 @@ def buffered(gen):
 
 type_re = re.compile("[0-9.#0+ -]*[diouxXeEfFgGcrsq]")
 
+# these are quick utils for building chunks of ast
+def _call(func,args):
+	return Call(func=func, args=args, keywords=[], starargs=None,kwargs=None)
+def _replace(node):
+	return Attribute(value=node, attr='replace', ctx=Load())
+def _quote(node):
+	return Expr(value=_call(_replace(_call(_replace(node)
+		, [Str(s="\""),Str(s="\\\"")]))
+		, [Str(s='\n'),Str(s="\\\n")]))
+	
+
 def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", base_path=".", **kw):
 	"""
 		Fast template engine, does very simple parsing and then generates the AST tree directly.
@@ -120,6 +131,18 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 
 		>>> ''.join(template(text="<p>%(name)s</p>", name="John"))
 		'<p>John</p>'
+		
+		The 'q' type specifier is special, it escapes quotation marks, and multi-line strings.
+
+		>>> ''.join(template(text="%(foo)q", foo=""\"Line 1:
+		... Line 2:
+		... Line 3:\"""))
+		'Line 1:\\\\\\nLine 2:\\\\\\nLine 3:'
+
+		>>> value = '"Halt!"'
+		>>> ''.join(template(text="%(value)q, the guard shouted.", value=value))
+		'\\\\"Halt!\\\\", the guard shouted.'
+
 
 		>>> with open("_test_file_", "w") as f:
 		...		f.write("<p>%(name)s</p>")
@@ -147,10 +170,6 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		>>> pi = 3.1415926
 		>>> ''.join(template(text="pi is about %(pi)d %(pi).2f %(pi).4f", pi=pi))
 		'pi is about 3 3.14 3.1416'
-
-		>>> value = '"Halt!"'
-		>>> ''.join(template(text="%(value)q, the guard shouted.", value=value))
-		'\\\\"Halt!\\\\", the guard shouted.'
 
 	"""
 
@@ -244,7 +263,8 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 					# then wrap the node in a call to the % operator with this type specifier
 					if type_part is not None:
 						if type_part == 'q':
-							new = Expr(value=Call(func=Attribute(value= node.value, attr='replace', ctx=Load(lineno=lineno), lineno=lineno), args=[Str(s="\"", lineno=lineno),Str(s="\\\"", lineno=lineno)], keywords=[], starargs=None, kwargs=None, lineno=lineno), lineno=lineno)
+							new = _quote(node.value)
+							# new = Expr(value=Call(func=Attribute(value= node.value, attr='replace', ctx=Load(lineno=lineno), lineno=lineno), args=[Str(s="\"", lineno=lineno),Str(s="\\\"", lineno=lineno)], keywords=[], starargs=None, kwargs=None, lineno=lineno), lineno=lineno)
 							node = ast.copy_location(new, node.value)
 						else:
 							new = Expr(value=BinOp(left=Str(s='%'+type_part, lineno=lineno), op=Mod(lineno=lineno), right=node.value, lineno=lineno), lineno=lineno)
