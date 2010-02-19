@@ -37,7 +37,8 @@ class TemplateTransformer(ast.NodeTransformer):
 		self.locals = locals if locals is not None else []
 	def visit_Expr(self, node):
 		if type(node.value) != Yield: # if there is a bare expression (that would get ignored), such as %(name), then Yield it instead
-			node.value = Yield(value=node.value)
+			new = Yield(value=node.value)
+			node.value = ast.copy_location(new, node.value)
 		if type(node.value.value) == Str:
 			if self.stripWhitespace:
 				s = strip_whitespace(node.value.value.s)
@@ -46,7 +47,8 @@ class TemplateTransformer(ast.NodeTransformer):
 				else:
 					node.value.value.s = s
 		else: # any yield that isn't yielding a string already, gets wrapped to produce one
-			node.value.value = Call(func=Name(id='str', ctx=Load()), args=[node.value.value], keywords=[], starargs=None, kwargs=None)
+			new = Call(func=Name(id='str', ctx=Load()), args=[node.value.value], keywords=[], starargs=None, kwargs=None)
+			node.value.value = ast.copy_location(new, node.value.value)
 		self.generic_visit(node.value)
 		return node
 	def visit_FunctionDef(self, node):
@@ -73,9 +75,10 @@ class TemplateTransformer(ast.NodeTransformer):
 				self.locals.index(node.id)
 			except ValueError: # if it's not one of the pre-defined locals
 				if builtins.__dict__.get(node.id,None) is None and self.seenFuncs.get(node.id,None) is None:
-					return Subscript( # replace the variable with a reference to args['...']
+					new = Subscript( # replace the variable with a reference to args['...']
 						value=Name(id='args', ctx=Load()),
-					slice=Index(value=Str(s=node.id)), ctx=node.ctx)
+						slice=Index(value=Str(s=node.id)), ctx=node.ctx, lineno=node.lineno)
+					return ast.copy_location(new, node)
 			return node
 		else: # is Load, but a local variable
 			return node
@@ -103,9 +106,11 @@ def include(filename, base_path):
 def buffered(gen):
 	return ''.join(gen)
 
+type_re = re.compile("[0-9.#0+ -]*[diouxXeEfFgGcrsq]")
+
 def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", base_path=".", **kw):
 	"""
-		Fast template engine, does very simple parsing (no regex, one split) and then generates the AST tree directly.
+		Fast template engine, does very simple parsing and then generates the AST tree directly.
 		The AST tree is compiled to bytecode and cached (so only the first run of a template must compile).
 		The code cache is in-memory only.
 	
@@ -113,12 +118,12 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		The template itself returns a generator, so you must read it out with something that will iterate it.
 		Typically, one would just join() it all, but you could also flush each block directly if you wanted.
 
-		>>> ''.join(template(text="<p>%(name)</p>", name="John"))
+		>>> ''.join(template(text="<p>%(name)s</p>", name="John"))
 		'<p>John</p>'
 
 		>>> with open("_test_file_", "w") as f:
-		...		f.write("<p>%(name)</p>")
-		14
+		...		f.write("<p>%(name)s</p>")
+		15
 		>>> ''.join(template(filename="_test_file_", name="Jacob"))
 		'<p>Jacob</p>'
 		>>> os.unlink("_test_file_")
@@ -129,15 +134,23 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		>>> ''.join(template(text=\"""
 		...	<ul>
 		...	%(for item in items:)
-		...		<li>%(item)</li>
+		...		<li>%(item)s</li>
 		...	%/
 		...	</ul>""\", items=["John", "Paul", "Ringo"], stripWhitespace=True))
 		...
 		'<ul><li>John</li><li>Paul</li><li>Ringo</li></ul>'
 
 		>>> import datetime
-		>>> ''.join(template(text="now is: %(datetime.datetime.strptime('12/10/2001','%d/%m/%Y').strftime('%d/%m/%y'))", datetime=datetime))
+		>>> ''.join(template(text="now is: %(datetime.datetime.strptime('12/10/2001','%d/%m/%Y').strftime('%d/%m/%y'))s", datetime=datetime))
 		'now is: 12/10/01'
+
+		>>> pi = 3.1415926
+		>>> ''.join(template(text="pi is about %(pi)d %(pi).2f %(pi).4f", pi=pi))
+		'pi is about 3 3.14 3.1416'
+
+		>>> value = '"Halt!"'
+		>>> ''.join(template(text="%(value)q, the guard shouted.", value=value))
+		'\\\\"Halt!\\\\", the guard shouted.'
 
 	"""
 
@@ -163,13 +176,14 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		if type(text) is bytes:
 			text = str(text, encoding)
 		head = Module(body=[ # build the first node of the new code tree
+			# which will be a module with a single function: 'execute', a generator function
 			FunctionDef(name='execute', args=arguments(args=[], vararg=None, varargannotation=None, kwonlyargs=[], kwarg='args', kwargannotation=None, defaults=[], kw_defaults=[]), 
 				body=[], decorator_list=[], returns=None),
 			])
 		# point a cursor into the tree where we will build from
 		# the cursor is a stack, so cursor[-1] is the current location
 		cursor = []
-		cursor.append(head.body[0].body)
+		cursor.append(head.body[0].body) # this is the body of the 'execute' function
 		# split up the text into chunks
 		chunks = text.split('%')
 		c = 0
@@ -186,7 +200,6 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		for c in range(len(chunks)):
 			chunk = chunks[c]
 			if len(chunk) == 0: continue
-			# print("chunk: %s" % repr(chunk))
 			if chunk[0] == '(':
 				i = match_forward(chunk, ')', '(', start=1)
 				# if we found a matched parentheses group %(...)...
@@ -195,6 +208,11 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 					raise TemplateFormatError("Unmatched '%%(' in template, beginning at: '%s'" % (chunk[0:50]))
 				eval_part = chunk[1:i]
 				text_part = chunk[i+1:]
+				type_part = None
+				m = type_re.match(text_part)
+				if m is not None:
+					type_part = m.group(0)
+					text_part = text_part[len(type_part):]
 				do_descend = False
 				if eval_part.endswith(":"): # if the statement to eval is like an if, while, or for, then we need to do some tricks
 					eval_part += " pass" # add a temp. node, so we can parse the incomplete statement
@@ -207,7 +225,7 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 						cursor[-1] = cursor[-2][-1].orelse
 						eval_part = eval_part[2:] # and add the if statement
 						do_descend = True
-					try:
+					try: # parse the body of the %( ... ) group
 						node = ast.parse(eval_part).body[0]
 					except IndentationError as e: # fix up indentation errors to make sure they indicate the right spot in the actual template file
 						e.filename = filename
@@ -217,11 +235,23 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 					except Exception as e:
 						print("Error while parsing sub-expression: %s" % (eval_part))
 						raise e
-					for child in ast.walk(node):
-						child.lineno = lineno
-						# print("setting lineno %d: %s" % (lineno, ast.dump(child)))
-					cursor[-1].append(node) # parse the body of the %( ... ) group
-					# print("%s => %s" % (eval_part, ast.dump(ast.parse(eval_part).body[0])))
+					
+					# update all the line numbers
+					# for child in ast.walk(node):
+						# child.lineno = lineno
+
+					# if this eval_part had a type_part attached (a type specifier as recognized by the % operator)
+					# then wrap the node in a call to the % operator with this type specifier
+					if type_part is not None:
+						if type_part == 'q':
+							new = Expr(value=Call(func=Attribute(value= node.value, attr='replace', ctx=Load(lineno=lineno), lineno=lineno), args=[Str(s="\"", lineno=lineno),Str(s="\\\"", lineno=lineno)], keywords=[], starargs=None, kwargs=None, lineno=lineno), lineno=lineno)
+							node = ast.copy_location(new, node.value)
+						else:
+							new = Expr(value=BinOp(left=Str(s='%'+type_part, lineno=lineno), op=Mod(lineno=lineno), right=node.value, lineno=lineno), lineno=lineno)
+							node = ast.copy_location(new, node.value)
+
+					# put our new node into the ast tree
+					cursor[-1].append(node)
 					if do_descend: # adjust the cursor is needed
 						del cursor[-1][-1].body[0] # clear the temp. node from this new block
 						cursor.append(cursor[-1][-1].body) # and point our cursor inside the new block
@@ -262,4 +292,4 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 
 if __name__ == "__main__":
 	import doctest
-	doctest.testmod()
+	doctest.testmod(raise_on_error=False)
