@@ -7,117 +7,7 @@ import re, io, os, ast, builtins
 from ast import *
 
 __all__ = ['template', 'buffered']
-
-class TemplateFormatError(Exception): pass
-
-def gen_bytes(gen, encoding):
-	for item in gen:
-		yield bytes(str(item), encoding)
-
-def match_forward(text, find, against, start=0, stop=-1):
-	count = 1
-	if stop == -1:
-		stop = len(text)
-	for i in range(start,stop):
-		if text[i] == against:
-			count += 1
-		elif text[i] == find:
-			count -= 1
-		if count == 0:
-			return i
-	return -1
-
-class TemplateTransformer(ast.NodeTransformer):
-	def __init__(self, stripWhitespace=False, encoding=None, locals=None):
-		ast.NodeTransformer.__init__(self)
-		self.seenStore = {}
-		self.seenFuncs = {}
-		self.encoding = encoding
-		self.stripWhitespace = stripWhitespace
-		self.locals = locals if locals is not None else []
-	def visit_Expr(self, node):
-		if type(node.value) != Yield: # if there is a bare expression (that would get ignored), such as %(name), then Yield it instead
-			new = Yield(value=node.value)
-			node.value = ast.copy_location(new, node.value)
-		if type(node.value.value) == Str:
-			if self.stripWhitespace:
-				s = strip_whitespace(node.value.value.s)
-				if len(s) == 0:
-					return None # dont even compile in the yield if it was only yielding white space
-				else:
-					node.value.value.s = s
-		else: # any yield that isn't yielding a string already, gets wrapped to produce one
-			new = Call(func=Name(id='str', ctx=Load()), args=[node.value.value], keywords=[], starargs=None, kwargs=None)
-			node.value.value = ast.copy_location(new, node.value.value)
-		self.generic_visit(node.value)
-		return node
-	def visit_FunctionDef(self, node):
-		self.seenFuncs[node.name] = True
-		for arg in node.args.args:
-			self.seenStore[arg.arg] = True
-		self.generic_visit(node)
-		return node
-	def visit_Call(self, node):
-		if type(node.func) is Name and self.seenFuncs.get(node.func.id, False) is not False: # if we are calling a function defined locally in the template
-			new = Call(func=Attribute(value=Str(s=''), attr='join', ctx=Load()), args=[node], keywords=[], starargs=None, kwargs=None)
-			self.generic_visit(node)
-			return ast.copy_location(new, node)
-		else:
-			pass
-		self.generic_visit(node)
-		return node
-	def visit_Name(self, node):
-		if type(node.ctx) == ast.Store:
-			self.seenStore[node.id] = True
-			return node
-		elif type(node.ctx) == ast.Load and self.seenStore.get(node.id, False) is False:
-			try:
-				self.locals.index(node.id)
-			except ValueError: # if it's not one of the pre-defined locals
-				if builtins.__dict__.get(node.id,None) is None and self.seenFuncs.get(node.id,None) is None:
-					new = Subscript( # replace the variable with a reference to args['...']
-						value=Name(id='args', ctx=Load()),
-						slice=Index(value=Str(s=node.id)), ctx=node.ctx, lineno=node.lineno)
-					return ast.copy_location(new, node)
-			return node
-		else: # is Load, but a local variable
-			return node
-
-def strip_whitespace(s):
-	out = io.StringIO()
-	remove = False
-	for c in s:
-		if c == "\n":
-			remove = True
-		if remove and c not in ("\n", "\t", " "):
-			remove = False
-		if not remove:
-			out.write(c)
-	return out.getvalue()
-	
-
-_code_cache = {}
-_include_cache = {}
-def include(filename, base_path):
-	if _include_cache.get(filename,None) is None:
-		_include_cache[filename] = strip_whitespace(open(os.path.sep.join(base_path + [filename])).read())
-	return _include_cache[filename]
-
-def buffered(gen):
-	return ''.join(gen)
-
-type_re = re.compile("[0-9.#0+ -]*[diouxXeEfFgGcrsq]")
-
-# these are quick utils for building chunks of ast
-def _call(func,args):
-	return Call(func=func, args=args, keywords=[], starargs=None,kwargs=None)
-def _replace(node):
-	return Attribute(value=node, attr='replace', ctx=Load())
-def _quote(node):
-	return Expr(value=_call(_replace(_call(_replace(node)
-		, [Str(s="\""),Str(s="\\\"")]))
-		, [Str(s='\n'),Str(s="\\\n")]))
-	
+type_re = re.compile("[0-9.#0+ -]*[diouxXeEfFgGcrsqm]")
 
 def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", base_path=".", **kw):
 	"""
@@ -132,12 +22,14 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		>>> ''.join(template(text="<p>%(name)s</p>", name="John"))
 		'<p>John</p>'
 		
-		The 'q' type specifier is special, it escapes quotation marks, and multi-line strings.
+		The 'm' type specifier will escape multiline strings.
 
-		>>> ''.join(template(text="%(foo)q", foo=""\"Line 1:
+		>>> ''.join(template(text="%(foo)m", foo=""\"Line 1:
 		... Line 2:
 		... Line 3:\"""))
 		'Line 1:\\\\\\nLine 2:\\\\\\nLine 3:'
+
+		The 'q' type specifier will escape quotation marks within the value.
 
 		>>> value = '"Halt!"'
 		>>> ''.join(template(text="%(value)q, the guard shouted.", value=value))
@@ -264,7 +156,9 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 					if type_part is not None:
 						if type_part == 'q':
 							new = _quote(node.value)
-							# new = Expr(value=Call(func=Attribute(value= node.value, attr='replace', ctx=Load(lineno=lineno), lineno=lineno), args=[Str(s="\"", lineno=lineno),Str(s="\\\"", lineno=lineno)], keywords=[], starargs=None, kwargs=None, lineno=lineno), lineno=lineno)
+							node = ast.copy_location(new, node.value)
+						elif type_part == 'm':
+							new = _multiline(node.value)
 							node = ast.copy_location(new, node.value)
 						else:
 							new = Expr(value=BinOp(left=Str(s='%'+type_part, lineno=lineno), op=Mod(lineno=lineno), right=node.value, lineno=lineno), lineno=lineno)
@@ -309,6 +203,112 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 	gen = loc['execute'](**kw)
 	return gen
 
+class TemplateFormatError(Exception): pass
+
+def gen_bytes(gen, encoding):
+	for item in gen:
+		yield bytes(str(item), encoding)
+
+def match_forward(text, find, against, start=0, stop=-1):
+	count = 1
+	if stop == -1:
+		stop = len(text)
+	for i in range(start,stop):
+		if text[i] == against:
+			count += 1
+		elif text[i] == find:
+			count -= 1
+		if count == 0:
+			return i
+	return -1
+
+class TemplateTransformer(ast.NodeTransformer):
+	def __init__(self, stripWhitespace=False, encoding=None, locals=None):
+		ast.NodeTransformer.__init__(self)
+		self.seenStore = {}
+		self.seenFuncs = {}
+		self.encoding = encoding
+		self.stripWhitespace = stripWhitespace
+		self.locals = locals if locals is not None else []
+	def visit_Expr(self, node):
+		if type(node.value) != Yield: # if there is a bare expression (that would get ignored), such as %(name), then Yield it instead
+			new = Yield(value=node.value)
+			node.value = ast.copy_location(new, node.value)
+		if type(node.value.value) == Str:
+			if self.stripWhitespace:
+				s = strip_whitespace(node.value.value.s)
+				if len(s) == 0:
+					return None # dont even compile in the yield if it was only yielding white space
+				else:
+					node.value.value.s = s
+		else: # any yield that isn't yielding a string already, gets wrapped to produce one
+			new = Call(func=Name(id='str', ctx=Load()), args=[node.value.value], keywords=[], starargs=None, kwargs=None)
+			node.value.value = ast.copy_location(new, node.value.value)
+		self.generic_visit(node.value)
+		return node
+	def visit_FunctionDef(self, node):
+		self.seenFuncs[node.name] = True
+		for arg in node.args.args:
+			self.seenStore[arg.arg] = True
+		self.generic_visit(node)
+		return node
+	def visit_Call(self, node):
+		if type(node.func) is Name and self.seenFuncs.get(node.func.id, False) is not False: # if we are calling a function defined locally in the template
+			new = Call(func=Attribute(value=Str(s=''), attr='join', ctx=Load()), args=[node], keywords=[], starargs=None, kwargs=None)
+			self.generic_visit(node)
+			return ast.copy_location(new, node)
+		else:
+			pass
+		self.generic_visit(node)
+		return node
+	def visit_Name(self, node):
+		if type(node.ctx) == ast.Store:
+			self.seenStore[node.id] = True
+			return node
+		elif type(node.ctx) == ast.Load and self.seenStore.get(node.id, False) is False:
+			try:
+				self.locals.index(node.id)
+			except ValueError: # if it's not one of the pre-defined locals
+				if builtins.__dict__.get(node.id,None) is None and self.seenFuncs.get(node.id,None) is None:
+					new = Subscript( # replace the variable with a reference to args['...']
+						value=Name(id='args', ctx=Load()),
+						slice=Index(value=Str(s=node.id)), ctx=node.ctx, lineno=node.lineno)
+					return ast.copy_location(new, node)
+			return node
+		else: # is Load, but a local variable
+			return node
+
+def strip_whitespace(s):
+	out = io.StringIO()
+	remove = False
+	for c in s:
+		if c == "\n":
+			remove = True
+		if remove and c not in ("\n", "\t", " "):
+			remove = False
+		if not remove:
+			out.write(c)
+	return out.getvalue()
+
+_code_cache = {}
+_include_cache = {}
+def include(filename, base_path):
+	if _include_cache.get(filename,None) is None:
+		_include_cache[filename] = strip_whitespace(open(os.path.sep.join(base_path + [filename])).read())
+	return _include_cache[filename]
+
+def buffered(gen):
+	return ''.join(gen)
+
+# these are quick utils for building chunks of ast
+def _call(func,args):
+	return Call(func=func, args=args, keywords=[], starargs=None,kwargs=None)
+def _replace(node):
+	return Attribute(value=node, attr='replace', ctx=Load())
+def _quote(node):
+	return Expr(value=_call(_replace(node), [Str(s="\""),Str(s="\\\"")]))
+def _multiline(node):
+	return Expr(value=_call(_replace(node), [Str(s='\n'),Str(s="\\\n")]))
 
 if __name__ == "__main__":
 	import doctest
