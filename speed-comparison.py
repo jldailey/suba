@@ -27,15 +27,15 @@ items = [
 ]
 
 def suba_test(N):
-	from suba import template, buffered
-	for _ in range(N):
-		(buffered(template(filename="bench_suba.tpl", base_path="benchmark", stripWhitespace=True, 
-			items = items, name="Suba")))
+	from suba import template # count the one-time import cost
+	for i in range(N):
+		ret = ''.join(template(filename="bench_suba.tpl", base_path="benchmark", stripWhitespace=False, 
+			items = items, name="Suba"))
 
 def tenjin_test(N):
 	engine = tenjin.Engine(cache=True, path=['benchmark']) # count the one time creation cost of the engine
-	for _ in range(N):
-		(engine.render('bench_tenjin.pyhtml', { 'list': items, 'name': "Tenjin" }))
+	for i in range(N):
+		ret = engine.render('bench_tenjin.pyhtml', { 'list': items, 'name': "Tenjin" })
 	elapsed = (time.time() - start)
 	os.unlink('benchmark/bench_tenjin.pyhtml.cache')
 	os.unlink('benchmark/_header.html.cache')

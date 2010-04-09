@@ -57,6 +57,19 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		...
 		'<ul><li>John</li><li>Paul</li><li>Ringo</li></ul>'
 
+		Tests for if, else, elif.
+
+		>>> ''.join(template(text=\"""
+		...	%(if foo:)
+		... foo is true
+		... %(elif bar:)
+		... bar is true
+		... %(else:)
+		... nothing is true
+		... %/\""", foo=False, bar=False, stripWhitespace=True))
+		'nothing is true'
+
+
 		>>> import datetime
 		>>> ''.join(template(text="now is: %(datetime.datetime.strptime('12/10/2001','%d/%m/%Y').strftime('%d/%m/%y'))s", datetime=datetime))
 		'now is: 12/10/01'
