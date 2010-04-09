@@ -62,10 +62,10 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		'now is: 12/10/01'
 
 		>>> pi = 3.1415926
-		>>> ''.join(template(text="pi is about %(pi)d %(pi).2f %(pi).4f", pi=pi))
-		'pi is about 3 3.14 3.1416'
+		>>> ''.join(template(text="pi is about %(pi)d, %(pi).2f, %(pi).4f", pi=pi))
+		'pi is about 3, 3.14, 3.1416'
 
-		Includes are supported.  The included file is compiled into ast, and the ast is inlined wherever it is included.
+		Includes are supported.  The included file is compiled and inlined wherever it is included.
 
 		>>> try: os.makedirs("_test/")
 		... except: pass
@@ -75,6 +75,24 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		>>> f.close()
 		>>> ''.join(template(text="<p>%(include('_test/included.suba'))</p>", name="John"))
 		'<p>This is a special message for John.</p>'
+
+		You can specify a base_path, a location to find templates, in three ways. (default is '.')
+
+		1. As a keyword argument to template().
+
+		>>> ''.join(template(text="<p>%(include('included.suba'))</p>", base_path="_test", name="Peter"))
+		'<p>This is a special message for Peter.</p>'
+
+		2. As a regular argument to include().
+
+		>>> ''.join(template(text="<p>%(include('included.suba', '_test'))</p>", name="Paul"))
+		'<p>This is a special message for Paul.</p>'
+
+		3. As a keyword argument to include().
+
+		>>> ''.join(template(text="<p>%(include('included.suba', base_path='_test'))</p>", name="Mary"))
+		'<p>This is a special message for Mary.</p>'
+
 		>>> os.remove("_test/included.suba")
 
 	"""
@@ -100,9 +118,9 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 			text = open(os.path.sep.join(base_path + [filename]), "rb").read()
 		if type(text) is bytes:
 			text = str(text, encoding)
-		head = compile_ast(text, stripWhitespace=stripWhitespace, encoding=encoding)
 		if filename is None:
 			filename = "<inline_template>"
+		head = compile_ast(text, stripWhitespace=stripWhitespace, encoding=encoding, base_path=base_path)
 		# print("COMPILING:", ast.dump(head))
 		_code_cache[h] = compile(head, filename, 'exec')
 
@@ -115,7 +133,7 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 	gen = loc['execute'](**kw)
 	return gen
 
-def compile_ast(text, stripWhitespace=False, encoding=None, filename=None, transform=True):
+def compile_ast(text, stripWhitespace=False, encoding=None, filename=None, transform=True, base_path=None):
 	""" Builds a Module ast tree.  Containing a single function: execute, a generator function. 
 		stripWhitespace and encoding are the same as in template().
 		filename is only used in debugging output, auto-generated if not specified.
@@ -235,7 +253,7 @@ def compile_ast(text, stripWhitespace=False, encoding=None, filename=None, trans
 	# print(ast.dump(head, include_attributes=False))
 	if transform:
 		# patch up the generated tree, to reference the keyword arguments when necessary
-		head = TemplateTransformer(stripWhitespace, encoding).visit(head)
+		head = TemplateTransformer(stripWhitespace, encoding, base_path).visit(head)
 		ast.fix_missing_locations(head)
 		# print("compile_ast, after transform:")
 		# print(ast.dump(head, include_attributes=False))
@@ -294,11 +312,17 @@ class TemplateTransformer(ast.NodeTransformer):
 					# or if there was a base_path= kwarg provided, use that
 					elif call.kwargs is not None:
 						base_path = call.kwargs.get('base_path', None)
-					# otherwise, set a default
-					if base_path is None:
-						base_path = []
+					if base_path is not None:
+						if type(base_path) is str:
+							base_path = os.path.sep.split(base_path)
+						elif type(base_path) is Str:
+							base_path = os.path.sep.split(base_path.s)
+						else:
+							raise TemplateFormatError("base_path argument to include() must be a string.")
 					else:
-						base_path = os.path.sep.split(base_path.s)
+						# if we didn't get one from the individual call
+						# look for one that was given as an argument to the template() call
+						base_path = self.base_path
 					# get the ast tree that comes from this included file
 					template_name = call.args[0].s
 					fundef = include_ast(template_name, base_path)
