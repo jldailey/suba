@@ -243,7 +243,7 @@ def compile_ast(text, stripWhitespace=False, encoding=None, filename=None, trans
 				# if there was text after the '/' (almost always), yield it out.
 				cursor[-1].append(Expr(value=Yield(value=Str(s=chunk[1:], lineno=lineno), lineno=lineno), lineno=lineno))
 		else:
-			# otherwise, it really wasn't a section that we are about
+			# otherwise, it really wasn't a section that we care about
 			# so put the % back in, and yield it out.
 			cursor[-1].append(Expr(value=Yield(value=Str(
 				s=("%"+chunk) if c > 0 else chunk, lineno=lineno), lineno=lineno), lineno=lineno))
@@ -281,20 +281,13 @@ def match_forward(text, find, against, start=0, stop=-1):
 class TemplateTransformer(ast.NodeTransformer):
 	def __init__(self, stripWhitespace=False, encoding=None, base_path=None):
 		ast.NodeTransformer.__init__(self)
-		self.seenStore = {}
+		# seenStore is a map of variables that are created within the template (not passed in)
+		self.seenStore = {'args': True} # 'args' is a special identifier that refers to the keyword argument dict
+		# seenFuncs is a map of the functions that are defined in the template ("def foo(): ...")
 		self.seenFuncs = {}
 		self.encoding = encoding
 		self.stripWhitespace = stripWhitespace
 		self.base_path = base_path if base_path is not None else []
-	# def visit_Expr(self, node):
-		# if type(node.value) != Yield: # if there is a bare expression (that would get ignored), such as %(name), then Yield it instead
-			# new = Yield(value=node.value)
-			# node.value = ast.copy_location(new, node.value)
-		# elif type(node.value.value) not in (Expr,Yield):
-			# new = Call(func=Name(id='str', ctx=Load()), args=[node.value.value], keywords=[], starargs=None, kwargs=None)
-			# node.value.value = ast.copy_location(new, node.value.value)
-		# self.generic_visit(node.value)
-		# return node
 	def visit_Expr(self, node):
 		""" When capturing a call to include, we must grab it here, so we can replace the whole Expr(Call('include')).
 		"""
@@ -334,20 +327,18 @@ class TemplateTransformer(ast.NodeTransformer):
 					for expr in fundef.body:
 						self.generic_visit(expr)
 					return fundef.body
+		elif type(node.value) is Yield:
+			y = node.value
+			if type(y.value) == Str:
+				if self.stripWhitespace:
+					s = strip_whitespace(y.value.s)
+					if len(s) == 0:
+						return None # dont even compile in the Expr(Yield) if it was only yielding white space
+					else:
+						y.value.s = s
 		self.generic_visit(node)
 		return node
 
-	def visit_Yield(self, node):
-		if type(node.value) == Str:
-			if self.stripWhitespace:
-				s = strip_whitespace(node.value.s)
-				if len(s) == 0:
-					return None # dont even compile in the yield if it was only yielding white space
-				else:
-					node.value.s = s
-		self.generic_visit(node)
-		return node
-		
 	def visit_FunctionDef(self, node):
 		self.seenFuncs[node.name] = True
 		for arg in node.args.args:
@@ -356,6 +347,7 @@ class TemplateTransformer(ast.NodeTransformer):
 		_yieldall(node.body)
 		self.generic_visit(node)
 		return node
+
 	def visit_Call(self, node):
 		""" 
 			1. Calling 'include' is a special case; it is replaced inline, and not called.
@@ -369,26 +361,27 @@ class TemplateTransformer(ast.NodeTransformer):
 			Then, this function is treated carefully, it must be iterable (str counts).
 		"""
 		if type(node.func) is Name: 
-			# if this Call is calling a function defined in the template, handle it safely (it's result must be iterable and str-able)
-			if self.seenFuncs.get(node.func.id, False) is not False: # if we are calling a function defined locally in the template
-				new = Call(func=Attribute(value=Str(s=''), attr='join', ctx=Load()), args=[node], keywords=[], starargs=None, kwargs=None)
+			# if this Call is calling a function defined in the template, handle it safely
+			# it's result must be join-able as string
+			if self.seenFuncs.get(node.func.id, False) is not False:
+				# replace the bare call with a ''.join(call)
+				new = _call(Attribute(value=Str(s=''), attr='join', ctx=Load()), [node])
 				self.generic_visit(node)
 				return ast.copy_location(new, node)
-		else:
-			pass
 		self.generic_visit(node)
 		return node
+
 	def visit_Name(self, node):
-		if type(node.ctx) == ast.Store:
-			self.seenStore[node.id] = True
-			return node
+		if type(node.ctx) == Store:
+				self.seenStore[node.id] = True
+				return node
 		# 'include' is handled specially elsewhere
 		if node.id == 'include':
 			return node
 		# else if we are reading a named variable, and it hasn't been set before
-		elif type(node.ctx) == ast.Load and self.seenStore.get(node.id, False) is False:
+		if type(node.ctx) == ast.Load and self.seenStore.get(node.id, False) is False:
 			# check if it is a builtin, or is a function defined in the template
-			if builtins.__dict__.get(node.id,None) is None and self.seenFuncs.get(node.id,None) is None and node.id is not 'args':
+			if builtins.__dict__.get(node.id,None) is None and self.seenFuncs.get(node.id,None) is None:
 				# if not, replace it with a reference to args[...]
 				new = Subscript(value=Name(id='args', ctx=Load()),
 					slice=Index(value=Str(s=node.id)), ctx=node.ctx, lineno=node.lineno)
@@ -396,6 +389,7 @@ class TemplateTransformer(ast.NodeTransformer):
 			return node
 		else: # is Load, but a local variable
 			return node
+
 
 def strip_whitespace(s):
 	out = io.StringIO()
