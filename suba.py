@@ -9,6 +9,7 @@ from ast import *
 __all__ = ['template']
 
 # to get complete compliance with all of python's type specifiers, we use a small regex
+# q, and m, are added by suba
 type_re = re.compile("[0-9.#0+ -]*[diouxXeEfFgGcrsqm]")
 
 def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", base_path=".", **kw):
@@ -108,19 +109,44 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 
 		>>> os.remove("_test/included.suba")
 
+		You can define functions locally in the template.
+
+		>>> ''.join(template(text=\"""%(def hex(s): return int(s, 16))%(hex('111'))d""\"))
+		'273'
+
+		>>> ''.join(template(text=\"""
+		... %(def hex(s):
+		... 	return int(s, 16))
+		... Your hex values are: %(for k,v in args.items():)
+		...	 %(k)=%(hex(v))d
+		...	%/
+		... \""", a="111", b="333", stripWhitespace=True))
+		'Your hex values are: a=273b=819'
+
+		You can use functions as macros, not just to compute return values.
+
+		>>> ''.join(template(text=\"""
+		... %(def li(data):)
+		...		<li>%(data)</li>%(# notice no print statement)
+		... %/
+		... %(li('one'))
+		... %(li('two'))
+		... \""", stripWhitespace=True))
+		'<li>one</li><li>two</li>'
+
 	"""
+	base_path = base_path.split(os.path.sep)
 
 	if text is None and filename is not None:
 		h = filename.__hash__()
 		try:
-			h += os.path.getmtime(filename)
+			h += os.path.getmtime(os.path.join(base_path + [filename]))
 		except:
 			pass
 	elif filename is None and text is not None:
 		h = text.__hash__()
 	else:
 		raise ArgumentError("template() requires either text= or filename= arguments.")
-	base_path = base_path.split(os.path.sep)
 	
 	## Compile Phase ##
 	# note about performance: compiling time is one-time only, so on scale it matters very very little.
@@ -134,7 +160,7 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		if filename is None:
 			filename = "<inline_template>"
 		head = compile_ast(text, stripWhitespace=stripWhitespace, encoding=encoding, base_path=base_path)
-		# print("COMPILING:", ast.dump(head))
+		# print("COMPILING:", ast.dump(head, include_attributes=True))
 		_code_cache[h] = compile(head, filename, 'exec')
 
 	## Execution Phase ##
@@ -207,15 +233,17 @@ def compile_ast(text, stripWhitespace=False, encoding=None, filename=None, trans
 					eval_part = eval_part[2:] # and add the if statement
 					do_descend = True
 				try: # parse the body of the %( ... ) group
-					node = ast.parse(eval_part).body[0]
+					body = ast.parse(eval_part).body
+					if len(body) == 0: # a block with no expressions (like all comments) will have no nodes and canbe skipped
+						continue
+					node = body[0]
 				except IndentationError as e: # fix up indentation errors to make sure they indicate the right spot in the actual template file
 					e.filename = filename
 					e.lineno += lineno - eval_part.count("\n")
 					e.offset += 2 # should be 2 + (space between left margin and opening %), but i dont know how to count this atm
 					raise
 				except Exception as e:
-					print("Error while parsing sub-expression: %s" % (eval_part))
-					raise e
+					raise Exception("Error while parsing sub-expression: %s" % (eval_part), e)
 				
 				# update all the line numbers
 				# for child in ast.walk(node):
@@ -349,6 +377,13 @@ class TemplateTransformer(ast.NodeTransformer):
 						return None # dont even compile in the Expr(Yield) if it was only yielding white space
 					else:
 						y.value.s = s
+			elif type(y.value) == Call:
+				call = y.value
+				if type(call.func) is Name:
+					if self.seenFuncs.get(call.func.id, False) is not False: # was defined locally
+						# replace the Call with one to ''.join(Call)
+						y.value = _call(Attribute(value=Str(s=''), attr='join', ctx=Load()), [y.value])
+						ast.copy_location(y.value, node)
 		self.generic_visit(node)
 		return node
 
@@ -358,29 +393,6 @@ class TemplateTransformer(ast.NodeTransformer):
 			self.seenStore[arg.arg] = True
 		# iterate over each Expr in the body, and make sure it is yielding
 		_yieldall(node.body)
-		self.generic_visit(node)
-		return node
-
-	def visit_Call(self, node):
-		""" 
-			1. Calling 'include' is a special case; it is replaced inline, and not called.
-			2. Also, if the template had defined a function locally, like:
-			\"""
-			%(def foo(x):)
-				Foo: %(x)
-			%/ 
-			Here is some %(foo('bar')), and then some %(foo('baz')).
-			\""" 
-			Then, this function is treated carefully, it must be iterable (str counts).
-		"""
-		if type(node.func) is Name: 
-			# if this Call is calling a function defined in the template, handle it safely
-			# it's result must be join-able as string
-			if self.seenFuncs.get(node.func.id, False) is not False:
-				# replace the bare call with a ''.join(call)
-				new = _call(Attribute(value=Str(s=''), attr='join', ctx=Load()), [node])
-				self.generic_visit(node)
-				return ast.copy_location(new, node)
 		self.generic_visit(node)
 		return node
 
@@ -449,19 +461,3 @@ def _yieldall(body):
 if __name__ == "__main__":
 	import doctest
 	doctest.testmod(raise_on_error=False)
-	# value = '"Halt!"'
-	# print(''.join(template(text="""%(for i in items:)%(i).%/""", items=['a','b','c'])))
-	# print(''.join(template(text="%(value)q, the guard shouted.", value=value)))
-	# '\\\\"Halt!\\\\", the guard shouted.'
-	# print(''.join(template(text="<p>%(name)s</p>", name="John")))
-	# try: os.makedirs("_test/")
-	# except: pass
-	# f = open("_test/included.suba", "w")
-	# f.write("special message for %(name)s")
-	# f.close()
-	# print(''.join(template(text="%(args)s", name="John")))
-	# print(''.join(template(text="<p>Hello, this is %(name)", name="John")))
-	# print(''.join(template(text="<p>This is a %(include('_test/included.suba')), are you %(name)s?", name="John")))
-	# # '<p>This is a special message for John, are you John?.</p>'
-	# os.remove("_test/included.suba")
-
