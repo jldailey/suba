@@ -3,7 +3,7 @@
 	The AST tree is compiled to bytecode and cached (so only the first run of a template must compile).
 	The bytecode cache is in-memory only.
 """
-import re, io, os, ast, builtins, copy
+import re, io, os, ast, builtins, copy, time
 from ast import *
 
 __all__ = ['template']
@@ -12,7 +12,10 @@ __all__ = ['template']
 # q, and m, are added by suba
 type_re = re.compile("[0-9.#0+ -]*[diouxXeEfFgGcrsqm]")
 
-def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", base_path=".", **kw):
+class TemplateFormatError(Exception): pass # fatal, caused by parsing failure, raises to caller
+class TemplateResourceModified(Exception): pass # non-fatal, causes refresh from disk
+
+def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", base_path=".", skipCache=False, **kw):
 	"""
 		Fast template engine, does very simple parsing and then generates the AST tree directly.
 		The AST tree is compiled to bytecode and cached (so only the first run of a template must compile).
@@ -107,6 +110,17 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		>>> ''.join(template(text="<p>%(include('included.suba', base_path='_test'))</p>", name="Mary"))
 		'<p>This is a special message for Mary.</p>'
 
+		If the file changes, the cache automatically updates on the next call.
+
+		>>> time.sleep(1) # make sure the mtime actually changes
+		>>> os.remove("_test/included.suba")
+		>>> f = open("_test/included.suba", "w")
+		>>> f.write("This is a special message from %(name)s.")
+		40
+		>>> f.close()
+		>>> ''.join(template(text="<p>%(include('included.suba', base_path='_test'))</p>", name="Mary"))
+		'<p>This is a special message from Mary.</p>'
+
 		>>> os.remove("_test/included.suba")
 
 		You can define functions locally in the template.
@@ -135,14 +149,13 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		'<li>one</li><li>two</li>'
 
 	"""
-	base_path = base_path.split(os.path.sep)
+	path = base_path.split(os.path.sep)
 
 	if text is None and filename is not None:
-		h = filename.__hash__()
-		try:
-			h += os.path.getmtime(os.path.join(base_path + [filename]))
-		except:
-			pass
+		# never allow absolute paths, or '..', in filenames
+		full_name = os.path.sep.join(path + [f for f in filename.split(os.path.sep) if f != '..' and f != ''])
+		h = full_name.__hash__()
+		h += os.path.getmtime(full_name)
 	elif filename is None and text is not None:
 		h = text.__hash__()
 	else:
@@ -152,32 +165,42 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 	# note about performance: compiling time is one-time only, so on scale it matters very very little.
 	# what matters is the execution of the generated code.
 	# absolutely anything that can be done to manipulate the generated AST to save execution time should be done.
-	if _code_cache.get(h, None) is None:
+	if skipCache or _code_cache.get(h, None) is None:
 		if filename is not None:
-			text = open(os.path.sep.join(base_path + [filename]), "rb").read()
+			text = open(os.path.sep.join(path + [filename]), "rb").read()
 		if type(text) is bytes:
 			text = str(text, encoding)
 		if filename is None:
 			filename = "<inline_template>"
-		head = compile_ast(text, stripWhitespace=stripWhitespace, encoding=encoding, base_path=base_path)
-		# print("COMPILING:", ast.dump(head, include_attributes=True))
+		head = compile_ast(text, stripWhitespace=stripWhitespace, encoding=encoding, base_path=path)
+		# print("COMPILING:", ast.dump(head, include_attributes=False))
 		_code_cache[h] = compile(head, filename, 'exec')
 
 	## Execution Phase ##
 	# provide a few global helpers and then execute the cached byte code
 	loc = {}
-	glob = {}
+	glob = {'TemplateResourceModified':TemplateResourceModified}
+	# this executes the Module(), which defines a function inside loc
 	exec(_code_cache[h], glob, loc)
-	# print("ARGUMENTS: %s" % kw)
+	# calling execute returns the generator, without having run any of the code inside yet
 	gen = loc['execute'](**kw)
-	return gen
+	# we pull the first item out, causing the preamble to run, yielding either True, or a TemplateResourceModified exception
+	for err in gen:
+		if err is None:
+			return gen
+		if type(err) == TemplateResourceModified:
+			# print("Forcing reload.",str(err))
+			del gen
+			return template(text=text, filename=filename, stripWhitespace=stripWhitespace, encoding=encoding, base_path=base_path, skipCache=True, **kw)
+		raise Exception("execute did not return a proper generator, first value was:",err)
 
 def compile_ast(text, stripWhitespace=False, encoding=None, filename=None, transform=True, base_path=None):
 	""" Builds a Module ast tree.  Containing a single function: execute, a generator function. 
 		stripWhitespace and encoding are the same as in template().
 		filename is only used in debugging output, auto-generated if not specified.
 	"""
-	head = Module(body=[ # build the first node of the new code tree
+	head = Module(body=[ 
+		# build the first node of the new code tree
 		# which will be a module with a single function: 'execute', a generator function
 		FunctionDef(name='execute', args=arguments(args=[], vararg=None, varargannotation=None, kwonlyargs=[], 
 				kwarg='args', kwargannotation=None, defaults=[], kw_defaults=[]), 
@@ -244,10 +267,6 @@ def compile_ast(text, stripWhitespace=False, encoding=None, filename=None, trans
 					raise
 				except Exception as e:
 					raise Exception("Error while parsing sub-expression: %s" % (eval_part), e)
-				
-				# update all the line numbers
-				# for child in ast.walk(node):
-					# child.lineno = lineno
 
 				# if this eval_part had a type_part attached (a type specifier as recognized by the % operator)
 				# then wrap the node in a call to the % operator with this type specifier
@@ -289,24 +308,36 @@ def compile_ast(text, stripWhitespace=False, encoding=None, filename=None, trans
 			cursor[-1].append(Expr(value=Yield(value=Str(
 				s=("%"+chunk) if c > 0 else chunk, lineno=lineno), lineno=lineno), lineno=lineno))
 		lineno += chunk.count("\n")
+	
 	ast.fix_missing_locations(head)
-	# print("compile_ast, before transform:")
-	# print(ast.dump(head, include_attributes=False))
-	if transform:
-		# patch up the generated tree, to reference the keyword arguments when necessary
-		head = TemplateTransformer(stripWhitespace, encoding, base_path).visit(head)
-		ast.fix_missing_locations(head)
-		# print("compile_ast, after transform:")
-		# print(ast.dump(head, include_attributes=False))
-	return head
 
-class TemplateFormatError(Exception): pass
+	if transform:
+		# include a single import os at the top
+		head.body[0].body = [
+			Import(names=[alias(name='os', asname=None, lineno=0, col_offset=0)], lineno=0, col_offset=0),
+		] + head.body[0].body
+		# patch up the generated tree, to reference the keyword arguments when necessary, etc
+		t = TemplateTransformer(stripWhitespace, encoding, base_path)
+		head = t.visit(head)
+		# any includes that were inlined during the transform will add freshness checks to head.preamble
+		# if none of the checks yielded (so it's all safe to proceed with this cached template)
+		# then yield True to release the generator to the caller see: the end of template()
+		t.preamble.append(Expr(value=Yield(value=Name(id='None', ctx=Load()))))
+		# now insert the preamble into the proper spot in the body (after the import, before the real stuff)
+		head.body[0].body[1:1] = t.preamble
+		del t
+		# then fill in any missing lineno, col_offsets so that compile() wont complain
+		ast.fix_missing_locations(head)
+
+	return head
 
 def gen_bytes(gen, encoding):
 	for item in gen:
 		yield bytes(str(item), encoding)
 
 def match_forward(text, find, against, start=0, stop=-1):
+	"""This will find the index of the closing parantheses.
+	'find' is the closing character, 'against' is the opening char."""
 	count = 1
 	if stop == -1:
 		stop = len(text)
@@ -323,12 +354,18 @@ class TemplateTransformer(ast.NodeTransformer):
 	def __init__(self, stripWhitespace=False, encoding=None, base_path=None):
 		ast.NodeTransformer.__init__(self)
 		# seenStore is a map of variables that are created within the template (not passed in)
-		self.seenStore = {'args': True} # 'args' is a special identifier that refers to the keyword argument dict
+		self.seenStore = {
+			'args': True, # 'args' is a special identifier that refers to the keyword argument dict
+			'TemplateResourceModified': True, # also a special case, because we forcibly add a reference
+			# inside all templates
+		}
 		# seenFuncs is a map of the functions that are defined in the template ("def foo(): ...")
 		self.seenFuncs = {}
 		self.encoding = encoding
 		self.stripWhitespace = stripWhitespace
 		self.base_path = base_path if base_path is not None else []
+		self.preamble = []
+
 	def visit_Expr(self, node):
 		""" When capturing a call to include, we must grab it here, so we can replace the whole Expr(Call('include')).
 		"""
@@ -341,28 +378,30 @@ class TemplateTransformer(ast.NodeTransformer):
 					base_path = None
 					# if the original call to include had an additional argument
 					# use that argument as the base_path
+					# print('call',ast.dump(call))
 					if len(call.args) > 1:
 						base_path = call.args[1].s
 					# or if there was a base_path= kwarg provided, use that
-					elif call.kwargs is not None:
-						base_path = call.kwargs.get('base_path', None)
-					if base_path is not None:
-						if type(base_path) is str:
-							base_path = os.path.sep.split(base_path)
-						elif type(base_path) is Str:
-							base_path = os.path.sep.split(base_path.s)
-						else:
-							raise TemplateFormatError("base_path argument to include() must be a string.")
-					else:
-						# if we didn't get one from the individual call
+					elif len(call.keywords) > 0:
+						for k in call.keywords:
+							if k.arg == "base_path":
+								base_path = k.value.s
+					if base_path is None:
+						# if we didn't get one from the call to include
 						# look for one that was given as an argument to the template() call
 						base_path = self.base_path
-					# get the ast tree that comes from this included file
+					if type(base_path) is str:
+						base_path = base_path.split(os.path.sep)
+					# the first argument to include() is the filename
 					template_name = call.args[0].s
-					fundef = include_ast(template_name, base_path)
+					# get the ast tree that comes from this included file
+					check, fundef = include_ast(template_name, base_path)
+					# each include produces the code to execute, plus some code to check for freshness
+					# this code absolutely must run first, because we can't restart the generator once it has already yielded
+					self.preamble.append(check)
 					if fundef is None:
 						raise TemplateFormatError("include_ast returned None")
-					# return a copy of the the cached ast tree, because it may be further modified by the including template
+					# return a copy of the the cached ast tree, because it will be further modified to fit with the including template
 					fundef = copy.deepcopy(fundef)
 					_yieldall(fundef.body)
 					for expr in fundef.body:
@@ -395,6 +434,15 @@ class TemplateTransformer(ast.NodeTransformer):
 		_yieldall(node.body)
 		self.generic_visit(node)
 		return node
+	
+	def visit_Import(self, node):
+		for name in node.names:
+			if name.asname is not None:
+				self.seenStore[name.asname] = True
+			else:
+				self.seenStore[name.name] = True
+		self.generic_visit(node)
+		return node
 
 	def visit_Name(self, node):
 		if type(node.ctx) == Store:
@@ -415,7 +463,6 @@ class TemplateTransformer(ast.NodeTransformer):
 		else: # is Load, but a local variable
 			return node
 
-
 def strip_whitespace(s):
 	out = io.StringIO()
 	remove = False
@@ -429,27 +476,46 @@ def strip_whitespace(s):
 	return out.getvalue()
 
 _code_cache = {}
-def include_ast(filename, base_path=[]):
-	h = filename.__hash__()
-	try:
-		h += os.path.getmtime(filename)
-	except:
-		pass
+def include_ast(filename, base_path=None):
+	if base_path is None:
+		base_path = []
+	full_name = os.path.sep.join(base_path + [f for f in filename.split(os.path.sep) if f != '..' and f != ''])
+	h = full_name.__hash__()
+	m = os.path.getmtime(full_name)
+	h += m
 	if _code_cache.get(h,None) is None:
-		module = compile_ast(open(os.path.sep.join(base_path + [filename])).read(), transform=False)
-		fundef = module.body[0] # the only element of the Module's body, is the function defintion
-		_code_cache[h] = fundef
-	return _code_cache[h]
+		with open(full_name) as f:
+			module = compile_ast(f.read(), transform=False)
+			fundef = module.body[0] # the only element of the Module's body, is the function defintion
+			_code_cache[h] = fundef
+	return _checkMtimeAndYield(full_name, m), _code_cache[h]
 
 # these are quick utils for building chunks of ast
 def _call(func,args):
+	""" func(args) """
 	return Call(func=func, args=args, keywords=[], starargs=None,kwargs=None)
 def _replace(node):
+	""" node.replace """
 	return Attribute(value=node, attr='replace', ctx=Load())
 def _quote(node):
+	""" node.replace('\"',"\\\"") """
 	return Expr(value=_call(_replace(node), [Str(s="\""),Str(s="\\\"")]))
 def _multiline(node):
+	""" node.replace('\n','\\n') """
 	return Expr(value=_call(_replace(node), [Str(s='\n'),Str(s="\\\n")]))
+def _compareMtime(full_name, mtime):
+	return Compare(left=Call(func=Attribute(value=Attribute(value=Name(id='os', ctx=Load(), lineno=0), attr='path', ctx=Load()), 
+		attr='getmtime', ctx=Load()), args=[Str(s=full_name)], keywords=[], starargs=None, kwargs=None), 
+		ops=[Gt()], 
+		comparators=[Num(n=mtime)])
+def _checkMtimeAndYield(full_name, mtime):
+	""" if os.path.getmtime(full_name) > mtime:
+		yield TemplateResourceModified(full_name)
+	""" # static checks like this are compiled into the top of include trees
+	return If(test=_compareMtime(full_name, mtime), body=[
+		Expr(value=Yield(value=Call(func=Name(id='TemplateResourceModified', ctx=Load(), lineno=0), 
+			args=[Str(s=full_name)], keywords=[], starargs=None, kwargs=None)))
+	], orelse=[])
 def _yieldall(body):
 	for i in range(len(body)):
 		expr = body[i]
