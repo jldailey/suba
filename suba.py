@@ -63,20 +63,28 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 
 		Tests for if, else, elif.
 
-		>>> ''.join(template(text=\"""
+		>>> t = \"""
 		...	%(if foo:)
 		... foo is true
 		... %(elif bar:)
 		... bar is true
 		... %(else:)
 		... nothing is true
-		... %/\""", foo=False, bar=False, stripWhitespace=True))
+		... %/\"""
+		>>> ''.join(template(text=t, foo=False, bar=False, stripWhitespace=True))
 		'nothing is true'
+		>>> ''.join(template(text=t, foo=True, bar=False, stripWhitespace=True))
+		'foo is true'
+		>>> ''.join(template(text=t, foo=False, bar=True, stripWhitespace=True))
+		'bar is true'
 
+		You can import modules and use them in the template.
 
 		>>> import datetime
-		>>> ''.join(template(text="now is: %(datetime.datetime.strptime('12/10/2001','%d/%m/%Y').strftime('%d/%m/%y'))s", datetime=datetime))
+		>>> ''.join(template(text="now is:%(import datetime) %(datetime.datetime.strptime('12/10/2001','%d/%m/%Y').strftime('%d/%m/%y'))s"))
 		'now is: 12/10/01'
+
+		You can use any conversion specifier that the Mod (%) operator supports.
 
 		>>> pi = 3.1415926
 		>>> ''.join(template(text="pi is about %(pi)d, %(pi).2f, %(pi).4f", pi=pi))
@@ -100,12 +108,12 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		>>> ''.join(template(text="<p>%(include('included.suba'))</p>", base_path="_test", name="Peter"))
 		'<p>This is a special message for Peter.</p>'
 
-		2. As a regular argument to include().
+		2. As a regular argument to include() within the template itself.
 
 		>>> ''.join(template(text="<p>%(include('included.suba', '_test'))</p>", name="Paul"))
 		'<p>This is a special message for Paul.</p>'
 
-		3. As a keyword argument to include().
+		3. As a keyword argument to include() within the template.
 
 		>>> ''.join(template(text="<p>%(include('included.suba', base_path='_test'))</p>", name="Mary"))
 		'<p>This is a special message for Mary.</p>'
@@ -115,11 +123,11 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		>>> time.sleep(1) # make sure the mtime actually changes
 		>>> os.remove("_test/included.suba")
 		>>> f = open("_test/included.suba", "w")
-		>>> f.write("This is a special message from %(name)s.")
-		40
+		>>> f.write("Thank you %(name)s, for the message!")
+		36
 		>>> f.close()
 		>>> ''.join(template(text="<p>%(include('included.suba', base_path='_test'))</p>", name="Mary"))
-		'<p>This is a special message from Mary.</p>'
+		'<p>Thank you Mary, for the message!</p>'
 
 		>>> os.remove("_test/included.suba")
 
@@ -130,14 +138,14 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 
 		>>> ''.join(template(text=\"""
 		... %(def hex(s):
-		... 	return int(s, 16))
+		...		return int(s, 16))
 		... Your hex values are: %(for k,v in args.items():)
-		...	 %(k)=%(hex(v))d
+		...	 %(k)=%(hex(v))d,
 		...	%/
 		... \""", a="111", b="333", stripWhitespace=True))
-		'Your hex values are: a=273b=819'
+		'Your hex values are: a=273,b=819,'
 
-		You can use functions as macros, not just to compute return values.
+		You can use functions as template macros, not just to compute return values.
 
 		>>> ''.join(template(text=\"""
 		... %(def li(data):)
@@ -147,6 +155,29 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		... %(li('two'))
 		... \""", stripWhitespace=True))
 		'<li>one</li><li>two</li>'
+
+		If you mess up the indentation of your python code in your template, it will alert you with a proper line number.
+
+		>>> f = open("_test/errors.suba", "w")
+		>>> f.write(""\"Line 1
+		... Line Two
+		... %("Line 3")
+		... %( if True:)
+		...		^^ with a wrong indent
+		... %/""\")
+		78
+		>>> f.close()
+		>>> ''.join(template(filename="errors.suba", base_path="_test"))
+		Traceback (most recent call last):
+			...
+			File "errors.suba", Line 4
+				if True:
+				 ^
+		IndentationError: unexpected indent
+		>>> try: os.remove("_test/errors.suba")
+		... except: pass
+		
+		TODO: more tests of this line number stuff, such as with includes, etc.
 
 	"""
 	path = base_path.split(os.path.sep)
@@ -172,7 +203,11 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 			text = str(text, encoding)
 		if filename is None:
 			filename = "<inline_template>"
-		head = compile_ast(text, stripWhitespace=stripWhitespace, encoding=encoding, base_path=path)
+		try:
+			head = compile_ast(text, stripWhitespace=stripWhitespace, encoding=encoding, base_path=path)
+		except IndentationError as e:
+			e.filename = filename
+			raise
 		# print("COMPILING:", ast.dump(head, include_attributes=False))
 		_code_cache[h] = compile(head, filename, 'exec')
 
@@ -194,11 +229,9 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 			return template(text=text, filename=filename, stripWhitespace=stripWhitespace, encoding=encoding, base_path=base_path, skipCache=True, **kw)
 		raise Exception("execute did not return a proper generator, first value was:",err)
 
-def compile_ast(text, stripWhitespace=False, encoding=None, filename=None, transform=True, base_path=None):
-	""" Builds a Module ast tree.  Containing a single function: execute, a generator function. 
-		stripWhitespace and encoding are the same as in template().
-		filename is only used in debugging output, auto-generated if not specified.
-	"""
+
+def compile_ast(text, stripWhitespace=False, encoding=None, transform=True, base_path=None):
+	"Builds a Module ast tree.	Containing a single function: execute, a generator function."
 	head = Module(body=[ 
 		# build the first node of the new code tree
 		# which will be a module with a single function: 'execute', a generator function
@@ -206,63 +239,151 @@ def compile_ast(text, stripWhitespace=False, encoding=None, filename=None, trans
 				kwarg='args', kwargannotation=None, defaults=[], kw_defaults=[]), 
 			body=[], decorator_list=[], returns=None, lineno=0),
 		],lineno=0)
-	# point a cursor into the tree where we will build from
-	# the cursor is a stack, so cursor[-1] is the current location for insertions
-	cursor = []
-	cursor.append(head.body[0].body) # this points the cursor at the body of the 'execute' function
-	# split up the text into chunks for parsing
-	chunks = text.split('%')
-	c = 0
-	# re-combine chunks that are not breaks between eval sections
-	while True:
-		if c >= len(chunks) - 1: break # force re-eval of len() on each loop
-		chunka = chunks[c]
-		chunkb = chunks[c + 1]
-		if chunkb[0] not in ('(','/'):
-			chunks[c] = chunka + '%' + chunkb
-			del chunks[c+1]
-		else:
-			c += 1
-	# this is the current lineno within the source text
-	lineno = 1 # we keep track of this as best we can, so that stack trace rendering points at the real template locations
-	for c in range(len(chunks)):
-		chunk = chunks[c]
-		if len(chunk) == 0: continue
-		if chunk[0] == '(':
-			i = match_forward(chunk, ')', '(', start=1)
-			# if we found a matched parentheses group %(...)...
-			# then eval the middle, and yield the left overs from after the closing )
-			if i == -1:
-				raise TemplateFormatError("Unmatched '%%(' in template, beginning at: '%s'" % (chunk[0:50]))
-			# each bit of template will be parsed into 3 chunks: %(<eval_part>)<type_part><text_part>
-			# type_part is allowed to be empty
-			eval_part = chunk[1:i]
-			text_part = chunk[i+1:]
+	cursor = [] # a stack
+	cursor.append(head.body[0].body)
+	# gets a series of ast,motion pairs from the gen_ast generator
+	for expr, motion in gen_ast(gen_chunks(text)):
+		if expr is not None: # add the ast node to the tree
+			cursor[-1].append(expr)
+		# then adjust the cursor according to motion
+		if motion is MOTION_ASCEND: # _ASCEND closes a block, such as an if, else, etc.
+			if len(cursor) < 2:
+				raise TemplateFormatError("Too many closings tags ('%/')")
+			# before we ascend, make sure all the Expr's in the about-to-be-closed body are yielding
+			_yieldall(cursor[-1])
+			cursor = cursor[:-1]
+		elif motion is MOTION_DESCEND: # _DESCEND puts the cursor in a .body
+			cursor.append(expr.body) # (if, def, with, try, except, etc. all work this way)
+			del cursor[-1][0] # the temporary 'pass' statement
+		elif motion is MOTION_ELSE_DESCEND: # _ELSE_DESCEND is used for else and elif
+			cursor[-1] = cursor[-2][-1].orelse
+
+	ast.fix_missing_locations(head)
+
+	if transform:
+		head.body[0].body = [
+			# include a single 'import os' at the top
+			Import(names=[alias(name='os', asname=None, lineno=0, col_offset=0)], lineno=0, col_offset=0),
+		] + head.body[0].body
+		# patch up the generated tree, to reference the keyword arguments when necessary, etc
+		t = TemplateTransformer(stripWhitespace, encoding, base_path)
+		head = t.visit(head)
+		# any includes that were inlined during the transform will add freshness checks to t.preamble
+		# if the checks fail, they will yield an exception (not raise it)
+		# template() above always reads the first item from the generator
+		# if none of the checks yielded (so it's all safe to proceed with this cached template)
+		# then we must yield None to release the generator to the caller see: the end of template()
+		t.preamble.append(Expr(value=Yield(value=Name(id='None', ctx=Load()))))
+		# now insert the preamble into the proper spot in the body (after the import, before the real stuff)
+		head.body[0].body[1:1] = t.preamble
+		del t
+		# then fill in any missing lineno, col_offsets so that compile() wont complain
+		ast.fix_missing_locations(head)
+
+	return head
+
+def gen_chunks(text, start=0):
+	"""A generator that does lexing for our parser. Yields <text>,<type> pairs.
+
+		>>> list(gen_chunks("abc%(123)def%g"))
+		[('abc', None), ('(123)', 'd'), ('ef', None), ('%', None), ('g', None)]
+
+		>>> list(gen_chunks("abc%()def%g"))
+		[('abc', None), ('()', 'd'), ('ef', None), ('%', None), ('g', None)]
+
+		>>> list(gen_chunks("abc%()def%%g"))
+		[('abc', None), ('()', 'd'), ('ef', None), ('%', None), ('', None), ('%', None), ('g', None)]
+
+		>>> list(gen_chunks("abc%(print('%s'))sef%%g"))
+		[('abc', None), ("(print('%s'))", 's'), ('ef', None), ('%', None), ('', None), ('%', None), ('g', None)]
+
+		>>> list(gen_chunks("<ul>%(for item in items:)<li>%(item)s</li>%/</ul>"))
+		[('<ul>', None), ('(for item in items:)', None), ('<li>', None), ('(item)', 's'), ('</li>', None), ('/', None), ('</ul>', None)]
+
+	"""
+
+	while -1 < start < len(text):
+		i = text.find('%',start)
+		if i == -1:
+			yield text[start:], None
+			break
+		yield text[start:i], None
+		if text[i+1] == '(':
+			m = match_forward(text, ')', '(', start=i+2)
+			if m == -1:
+				raise TemplateFormatError("Unmatched %%( starting at '%s'" % text[i:i+40])
+			text_part = text[m+1:]
 			type_part = None
-			m = type_re.match(text_part)
-			if m is not None:
-				type_part = m.group(0)
-				text_part = text_part[len(type_part):]
-			do_descend = False
+			ma = type_re.match(text_part)
+			start = m + 1
+			if ma is not None:
+				type_part = ma.group(0)
+				start += len(type_part)
+			yield text[i+1:m+1], type_part
+		elif text[i+1] == '/':
+			yield '/', None
+			start = i + 2
+		else:
+			yield '%', None
+			start = i + 1
+
+MOTION_NONE = 0
+MOTION_ASCEND = 1
+MOTION_DESCEND = 2
+MOTION_ELSE_DESCEND = 3
+MOTION_ELIF_DESCEND = 4
+
+def gen_ast(chunks):
+	""" Given a chunks iterable, yields a series of [<ast>,<motion>] pairs.
+		>>> [ (ast.dump(x),y) for x,y in gen_ast(gen_chunks("abc%(123)def%g")) ]
+		[("Expr(value=Yield(value=Str(s='abc')))", 0), ("Expr(value=Yield(value=BinOp(left=Str(s='%d'), op=Mod(), right=Num(n=123))))", 0), ("Expr(value=Yield(value=Str(s='ef%g')))", 0)]
+	"""
+	stack = []
+	lineno = 0
+	def linecount(t):
+		return max(t.count('\r'),t.count('\n'))
+	for chunk, type_part in chunks:
+		# print("CHUNK:",chunk.replace('\n','\\n').replace('\t','\\t'),type_part)
+		if len(chunk) == 0:
+			continue
+		if chunk[0] in ('/','('):
+			# yield any text on the stack first
+			if len(stack) > 0:
+				yield Expr(value=Yield(value=Str(s=''.join(stack)))), MOTION_NONE
+				stack = []
+		else:
+			if len(chunk) > 0:
+				lineno += linecount(chunk)
+				stack.append(chunk)
+
+		if chunk[0] == '/':
+			yield None, MOTION_ASCEND
+			if len(chunk) > 1:
+				lineno += linecount(chunk)
+				yield Expr(value=Yield(value=Str(s=chunk[1:]))), MOTION_NONE
+		elif chunk[0] == '(':
+			motion = MOTION_NONE
+			node = None
+			# eval the middle
+			eval_part = chunk[1:-1]
+
 			if eval_part.endswith(":"): # if the statement to eval is like an if, while, or for, then we need to do some tricks
 				eval_part += " pass" # add a temp. node, so we can parse the incomplete statement
-				do_descend = True
+				motion = MOTION_DESCEND
+			
 			if eval_part.startswith("else:"):
-				# for an else statement, just move the cursor back and over to the orelse block
-				cursor[-1] = cursor[-2][-1].orelse
+				motion = MOTION_ELSE_DESCEND
 			else:
 				if eval_part.startswith("elif "):
-					cursor[-1] = cursor[-2][-1].orelse
-					eval_part = eval_part[2:] # and add the if statement
-					do_descend = True
-				try: # parse the body of the %( ... ) group
+					yield None, MOTION_ELSE_DESCEND # yield an immediate else descend
+					motion = MOTION_DESCEND # then the 'if' statement from this line will descend regularly
+					eval_part = eval_part[2:] # chop off the 'el' so we parse as a regular 'if' statement
+				try: # parse the eval_part
 					body = ast.parse(eval_part).body
-					if len(body) == 0: # a block with no expressions (like all comments) will have no nodes and canbe skipped
-						continue
-					node = body[0]
+					if len(body) > 0: # a block with no expressions (e.g., it was all comments) will have no nodes and can be skipped
+						node = body[0]
 				except IndentationError as e: # fix up indentation errors to make sure they indicate the right spot in the actual template file
-					e.filename = filename
-					e.lineno += lineno - eval_part.count("\n")
+					e.lineno += lineno - linecount(eval_part)
 					e.offset += 2 # should be 2 + (space between left margin and opening %), but i dont know how to count this atm
 					raise
 				except Exception as e:
@@ -270,6 +391,7 @@ def compile_ast(text, stripWhitespace=False, encoding=None, filename=None, trans
 
 				# if this eval_part had a type_part attached (a type specifier as recognized by the % operator)
 				# then wrap the node in a call to the % operator with this type specifier
+				# NOTE TO SELF: this depends on node.value, will this crash if you do %(if foo:)s, which is If(...,body=[]), with no value?
 				if type_part is not None:
 					# q and m are special modifiers used only in suba
 					fq = type_part.find('q')
@@ -281,55 +403,16 @@ def compile_ast(text, stripWhitespace=False, encoding=None, filename=None, trans
 						new = _multiline(node.value)
 						node = ast.copy_location(new, node.value)
 					if fq == -1 and fm == -1:
-						# the default case, just pass the type_part on to the % operator
-						new = Expr(value=BinOp(left=Str(s='%'+type_part,lineno=0), op=Mod(lineno=0), right=node.value,lineno=0),lineno=0)
+						# the default case, just pass the type_part on to the Mod operator
+						new = Expr(value=Yield(value=BinOp(left=Str(s='%'+type_part), op=Mod(), right=node.value)))
 						node = ast.copy_location(new, node.value)
 
-				# put our new node into the ast tree
-				cursor[-1].append(node)
-				if do_descend: # adjust the cursor is needed
-					del cursor[-1][-1].body[0] # clear the temp. node from this new block
-					cursor.append(cursor[-1][-1].body) # and point our cursor inside the new block
-			if len(text_part): # if there is left over text after the %( ... ) block, yield it out.
-				cursor[-1].append(Expr(value=Yield(value=Str(s=text_part, lineno=lineno), lineno=lineno), lineno=lineno))
-		elif chunk[0] == '/': # process a %/ block terminator, by decreasing the indent
-			if len(cursor) < 2: # if there is nothing on the stack to close
-				raise TemplateFormatError("Too many close tags %/")
-			# before we ascend, make sure all the Expr's in the about-to-be-closed body are yielding
-			_yieldall(cursor[-1])
-			# pop the right side off the cursor stack
-			cursor = cursor[:-1]
-			if len(chunk) > 1:
-				# if there was text after the '/' (almost always), yield it out.
-				cursor[-1].append(Expr(value=Yield(value=Str(s=chunk[1:], lineno=lineno), lineno=lineno), lineno=lineno))
-		else:
-			# otherwise, it really wasn't a section that we care about
-			# so put the % back in, and yield it out.
-			cursor[-1].append(Expr(value=Yield(value=Str(
-				s=("%"+chunk) if c > 0 else chunk, lineno=lineno), lineno=lineno), lineno=lineno))
-		lineno += chunk.count("\n")
-	
-	ast.fix_missing_locations(head)
+			# yield the parsed node
+			yield node, motion
 
-	if transform:
-		# include a single import os at the top
-		head.body[0].body = [
-			Import(names=[alias(name='os', asname=None, lineno=0, col_offset=0)], lineno=0, col_offset=0),
-		] + head.body[0].body
-		# patch up the generated tree, to reference the keyword arguments when necessary, etc
-		t = TemplateTransformer(stripWhitespace, encoding, base_path)
-		head = t.visit(head)
-		# any includes that were inlined during the transform will add freshness checks to head.preamble
-		# if none of the checks yielded (so it's all safe to proceed with this cached template)
-		# then yield True to release the generator to the caller see: the end of template()
-		t.preamble.append(Expr(value=Yield(value=Name(id='None', ctx=Load()))))
-		# now insert the preamble into the proper spot in the body (after the import, before the real stuff)
-		head.body[0].body[1:1] = t.preamble
-		del t
-		# then fill in any missing lineno, col_offsets so that compile() wont complain
-		ast.fix_missing_locations(head)
-
-	return head
+	if len(stack) > 0:
+		# yield the remaining text
+		yield Expr(value=Yield(value=Str(s=''.join(stack)))), MOTION_NONE
 
 def gen_bytes(gen, encoding):
 	for item in gen:
@@ -527,3 +610,23 @@ def _yieldall(body):
 if __name__ == "__main__":
 	import doctest
 	doctest.testmod(raise_on_error=False)
+	text = """abc%(123)def%g
+	%(if True:)
+	yes
+	%(elif False:)
+	elif here
+	%(else:)
+	no
+	%/
+	print(text)
+	for node, dir in gen_ast(gen_chunks(text)):
+		if node is not None:
+			print(ast.dump(node), dir)
+		else:
+			print(node,dir)
+
+	print(ast.dump(compile_ast(text)))
+	print(list(gen_chunks(text)))
+	print(list(gen_chunks("abc%(123)def%g")))
+	print(list(gen_ast(gen_chunks("<ul>%(for item in items:)<li>%(item)s</li>%/</ul>"))))
+	"""
