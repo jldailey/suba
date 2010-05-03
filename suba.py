@@ -158,13 +158,12 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		You can use functions as template macros, not just to compute return values.
 
 		>>> ''.join(template(text=\"""
-		... %(def li(data):)
-		...		<li>%(data)</li>%(# notice no print statement)
+		... %(def li(data, cls=None):)
+		...		<li%(if cls:) class="%(cls)"%/>%(data)</li>
 		... %/
 		... %(li('one'))
-		... %(li('two'))
-		... \""", stripWhitespace=True))
-		'<li>one</li><li>two</li>'
+		... %(li('two', cls='foo'))\""", stripWhitespace=True))
+		'<li>one</li><li class="foo">two</li>'
 
 		If you mess up the indentation of your python code in your template, it will alert you with a proper line number.
 
@@ -269,7 +268,7 @@ def compile_ast(text, stripWhitespace=False, encoding=None, transform=True, base
 		# then adjust the cursor according to motion
 		if motion is MOTION_ASCEND: # _ASCEND closes a block, such as an if, else, etc.
 			if len(cursor) < 2:
-				raise TemplateFormatError("Too many closings tags ('%/')")
+				raise TemplateFormatError("Too many closings tags ('%/') at ", str(cursor))
 			# before we ascend, make sure all the Expr's in the about-to-be-closed body are yielding
 			_yieldall(cursor[-1])
 			cursor = cursor[:-1]
@@ -415,30 +414,34 @@ def gen_ast(chunks):
 						node = locate(node)
 				except IndentationError as e: # fix up indentation errors to make sure they indicate the right spot in the actual template file
 					e.lineno += lineno - linecount(eval_part)
-					e.offset += 2 # should be 2 + (space between left margin and opening %), but i dont know how to count this atm
+					e.offset += 1 # should be 1 + (space between left margin and opening %), but i dont know how to count this atm
 					raise
 				except Exception as e:
 					e.lineno += lineno - linecount(eval_part)
-					e.offset += 2
-					raise Exception("Error while parsing sub-expression: %s, %s" % (eval_part, e))
+					e.offset += 1
+					raise Exception("Error while parsing sub-expression: %s, %s" % (eval_part, str(e)), e)
 
 				# if this eval_part had a type_part attached (a conversion specifier as recognized by the % operator)
 				# then wrap the node in a call to the % operator with this type specifier
-				# NOTE TO SELF: this depends on node.value, will this crash if you do %(if foo:)s, which is If(...,body=[]), with no value?
 				if type_part is not None:
-					# q and m are special modifiers used only in suba
-					fq = type_part.find('q')
-					fm = type_part.find('m')
-					if fq > -1:
-						new = _quote(node.value)
-						node = ast.copy_location(new, node.value)
-					if fm > -1:
-						new = _multiline(node.value)
-						node = ast.copy_location(new, node.value)
-					if fq == -1 and fm == -1:
-						# the default case, just pass the type_part on to the Mod operator
-						new = Expr(value=Yield(value=BinOp(left=Str(s='%'+type_part), op=Mod(), right=node.value)))
-						node = ast.copy_location(new, node.value)
+					# you can't give a type on a node with no value
+					if not hasattr(node, 'value'):
+						# so just put the type_part on the stack as regular text to be yielded
+						stack.append(type_part)
+					else:
+						# q and m are special modifiers used only in suba
+						fq = type_part.find('q')
+						fm = type_part.find('m')
+						if fq > -1:
+							new = _quote(node.value)
+							node = ast.copy_location(new, node.value)
+						if fm > -1:
+							new = _multiline(node.value)
+							node = ast.copy_location(new, node.value)
+						# for the default types, just pass the type_part on to the Mod operator
+						if fq == -1 and fm == -1:
+							new = Expr(value=Yield(value=BinOp(left=Str(s='%'+type_part), op=Mod(), right=node.value)))
+							node = ast.copy_location(new, node.value)
 
 			# yield the parsed node
 			# print("gen_ast:", ast.dump(node, include_attributes=True))
