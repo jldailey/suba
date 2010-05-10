@@ -15,6 +15,16 @@ type_re = re.compile("[0-9.#0+ -]*[diouxXeEfFgGcrsqm]")
 class FormatError(Exception): pass # fatal, caused by parsing failure, raises to caller
 class ResourceModified(Exception): pass # non-fatal, causes refresh from disk
 
+CLOSE_MARK = '/'
+OPEN_MARK = '%'
+OPEN_PAREN = '('
+CLOSE_PAREN = ')'
+
+MOTION_NONE = 0
+MOTION_ASCEND = 1
+MOTION_DESCEND = 2
+MOTION_ELSE_DESCEND = 3
+
 def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", base_path=".", skipCache=False, **kw):
 	"""
 		Fast template engine, does very simple parsing and then generates the AST tree directly.
@@ -148,13 +158,12 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		You can use functions as template macros, not just to compute return values.
 
 		>>> ''.join(template(text=\"""
-		... %(def li(data):)
-		...		<li>%(data)</li>%(# notice no print statement)
+		... %(def li(data, cls=None):)
+		...		<li%(if cls:) class="%(cls)"%/>%(data)</li>
 		... %/
 		... %(li('one'))
-		... %(li('two'))
-		... \""", stripWhitespace=True))
-		'<li>one</li><li>two</li>'
+		... %(li('two', cls='foo'))\""", stripWhitespace=True))
+		'<li>one</li><li class="foo">two</li>'
 
 		If you mess up the indentation of your python code in your template, it will alert you with a proper line number.
 
@@ -177,7 +186,17 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		>>> try: os.remove("_test/errors.suba")
 		... except: pass
 
+		>>> ''.join(template(""\"
+		...	line 2
+		... %(x = 1/0)
+		... line 4""\"))
+		Traceback (most recent call last):
+			...
+			File "<inline_template>", line 3, in execute
+		ZeroDivisionError: int division or modulo by zero
+		
 		TODO: more tests of this line number stuff, such as with includes, etc.
+		TODO: improve the quality of these lineno tests, as doctest doesn't check the stacktrace
 	"""
 	path = base_path.split(os.path.sep)
 
@@ -207,7 +226,7 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		except IndentationError as e:
 			e.filename = filename
 			raise
-		# print("COMPILING:", ast.dump(head, include_attributes=False))
+		# print("COMPILING:", ast.dump(head, include_attributes=True))
 		_code_cache[h] = compile(head, filename, 'exec')
 
 	## Execution Phase ##
@@ -244,6 +263,7 @@ def compile_ast(text, stripWhitespace=False, encoding=None, transform=True, base
 	for expr, motion in gen_ast(gen_chunks(text)):
 		if expr is not None: # add the ast node to the tree
 			cursor[-1].append(expr)
+			# print("compile_ast:",ast.dump(expr, include_attributes=True))
 		# then adjust the cursor according to motion
 		if motion is Ascend: # Ascend closes a block, such as an if, else, etc.
 			if len(cursor) < 2:
@@ -257,8 +277,6 @@ def compile_ast(text, stripWhitespace=False, encoding=None, transform=True, base
 		elif motion is ElseDescend: # ElseDescend is used for else and elif
 			# it just steps the cursor sideways, to the else block
 			cursor[-1] = cursor[-2][-1].orelse
-
-	ast.fix_missing_locations(head)
 
 	if transform:
 		head.body[0].body = [
@@ -303,15 +321,15 @@ def gen_chunks(text, start=0):
 	"""
 
 	while -1 < start < len(text):
-		i = text.find('%',start)
+		i = text.find(OPEN_MARK,start)
 		if i == -1:
 			yield text[start:], None
 			break
 		yield text[start:i], None
-		if text[i+1] == '(':
-			m = match_forward(text, ')', '(', start=i+2)
+		if text[i+1] == OPEN_PAREN:
+			m = match_forward(text, CLOSE_PAREN, OPEN_PAREN, start=i+2)
 			if m == -1:
-				raise FormatError("Unmatched %%( starting at '%s'" % text[i:i+40])
+				raise FormatError("Unmatched %s( starting at '%s'" % (OPEN_MARK, text[i:i+40]))
 			text_part = text[m+1:]
 			type_part = None
 			ma = type_re.match(text_part)
@@ -320,11 +338,11 @@ def gen_chunks(text, start=0):
 				type_part = ma.group(0)
 				start += len(type_part)
 			yield text[i+1:m+1], type_part
-		elif text[i+1] == '/':
-			yield '/', None
+		elif text[i+1] == CLOSE_MARK:
+			yield CLOSE_MARK, None
 			start = i + 2
 		else:
-			yield '%', None
+			yield OPEN_MARK, None
 			start = i + 1
 
 class NoMotion: pass
@@ -332,41 +350,58 @@ class Ascend: pass
 class Descend: pass
 class ElseDescend: pass
 
+def linecount(t):
+	return max(t.count('\r'),t.count('\n'))
+
 def gen_ast(chunks):
 	""" Given a chunks iterable, yields a series of [<ast>,<motion>] pairs.
 		>>> [ (ast.dump(x),y.__name__) for x,y in gen_ast(gen_chunks("abc%(123)def%g")) ]
 		[("Expr(value=Yield(value=Str(s='abc')))", 'NoMotion'), ("Expr(value=Yield(value=BinOp(left=Str(s='%d'), op=Mod(), right=Num(n=123))))", 'NoMotion'), ("Expr(value=Yield(value=Str(s='ef%g')))", 'NoMotion')]
 	"""
 	stack = []
-	lineno = 0
-	def linecount(t):
-		return max(t.count('\r'),t.count('\n'))
+	lineno = 1
+	# a closure to assign the lineno to all nodes
+	def locate(n):
+		if n is not None:
+			for node in ast.walk(n):
+				node.lineno = lineno
+				node.col_offset = 0
+		return n
+
 	for chunk, type_part in chunks:
-		# print("CHUNK:",chunk.replace('\n','\\n').replace('\t','\\t'),type_part)
+
+		# ignore empty chunks
 		if len(chunk) == 0:
 			continue
-		if chunk[0] in ('/','('):
-			# yield any text on the stack first
-			if len(stack) > 0:
-				yield Expr(value=Yield(value=Str(s=''.join(stack)))), NoMotion
-				stack = []
-		else:
-			if len(chunk) > 0:
-				lineno += linecount(chunk)
-				stack.append(chunk)
 
-		if chunk[0] == '/':
+		# if it's a plain piece of text
+		if chunk[0] not in (CLOSE_MARK, OPEN_PAREN):
+			stack.append(chunk) # stack it up for later
+			continue # get the next chunk
+		# otherwise, it is something we will need to eval
+
+		# yield all text on the stack before proceeding
+		if len(stack) > 0:
+			text = ''.join(stack)
+			if len(text) > 0:
+				yield locate(Expr(value=Yield(value=Str(s=text)))), NoMotion
+				lineno += linecount(text) # count it
+			stack = []
+
+		# if it's a close marker
+		if chunk[0] == CLOSE_MARK:
 			yield None, Ascend
 			if len(chunk) > 1:
-				lineno += linecount(chunk)
-				yield Expr(value=Yield(value=Str(s=chunk[1:]))), NoMotion
-		elif chunk[0] == '(':
-			motion = NoMotion
-			node = None
-			# eval the middle
-			eval_part = chunk[1:-1]
+				stack.append(chunk[1:]) # stack it for later
 
-			if eval_part.endswith(":"): # if the statement to eval is like an if, while, or for, then we need to do some tricks
+		elif chunk[0] == OPEN_PAREN:
+			# set up the default node, motion we will yield based on what we find inside this OPEN_PAREN
+			node = None
+			motion = NoMotion
+			# eval the middle (without the parens)
+			eval_part = chunk[1:-1]
+			# if the statement to eval is like an if, while, or for, then we need to do some tricks
+			if eval_part.endswith(":"):
 				eval_part += " pass" # add a temp. node, so we can parse the incomplete statement
 				motion = Descend
 
@@ -381,37 +416,45 @@ def gen_ast(chunks):
 					body = ast.parse(eval_part).body
 					if len(body) > 0: # a block with no expressions (e.g., it was all comments) will have no nodes and can be skipped
 						node = body[0]
+						node = locate(node)
 				except IndentationError as e: # fix up indentation errors to make sure they indicate the right spot in the actual template file
 					e.lineno += lineno - linecount(eval_part)
-					e.offset += 2 # should be 2 + (space between left margin and opening %), but i dont know how to count this atm
+					e.offset += 1 # should be 1 + (space between left margin and opening %), but i dont know how to count this atm
 					raise
 				except Exception as e:
-					raise Exception("Error while parsing sub-expression: %s" % (eval_part), e)
+					e.lineno += lineno - linecount(eval_part)
+					e.offset += 1
+					raise Exception("Error while parsing sub-expression: %s, %s" % (eval_part, str(e)), e)
 
-				# if this eval_part had a type_part attached (a type specifier as recognized by the % operator)
+				# if this eval_part had a type_part attached (a conversion specifier as recognized by the % operator)
 				# then wrap the node in a call to the % operator with this type specifier
-				# NOTE TO SELF: this depends on node.value, will this crash if you do %(if foo:)s, which is If(...,body=[]), with no value?
 				if type_part is not None:
-					# q and m are special modifiers used only in suba
-					fq = type_part.find('q')
-					fm = type_part.find('m')
-					if fq > -1:
-						new = _quote(node.value)
-						node = ast.copy_location(new, node.value)
-					if fm > -1:
-						new = _multiline(node.value)
-						node = ast.copy_location(new, node.value)
-					if fq == -1 and fm == -1:
-						# the default case, just pass the type_part on to the Mod operator
-						new = Expr(value=Yield(value=BinOp(left=Str(s='%'+type_part), op=Mod(), right=node.value)))
-						node = ast.copy_location(new, node.value)
+					# you can't give a type on a node with no value
+					if not hasattr(node, 'value'):
+						# so just put the type_part on the stack as regular text to be yielded
+						stack.append(type_part)
+					else:
+						# q and m are special modifiers used only in suba
+						fq = type_part.find('q')
+						fm = type_part.find('m')
+						if fq > -1:
+							new = _quote(node.value)
+							node = ast.copy_location(new, node.value)
+						if fm > -1:
+							new = _multiline(node.value)
+							node = ast.copy_location(new, node.value)
+						# for the default types, just pass the type_part on to the Mod operator
+						if fq == -1 and fm == -1:
+							new = Expr(value=Yield(value=BinOp(left=Str(s='%'+type_part), op=Mod(), right=node.value)))
+							node = ast.copy_location(new, node.value)
 
 			# yield the parsed node
+			# print("gen_ast:", ast.dump(node, include_attributes=True))
 			yield node, motion
 
 	if len(stack) > 0:
 		# yield the remaining text
-		yield Expr(value=Yield(value=Str(s=''.join(stack)))), NoMotion
+		yield locate(Expr(value=Yield(value=Str(s=''.join(stack))))), NoMotion
 
 def gen_bytes(gen, encoding):
 	for item in gen:
@@ -439,7 +482,7 @@ class Transformer(ast.NodeTransformer):
 		self.seenStore = {
 			'args': True, # 'args' is a special identifier that refers to the keyword argument dict
 			'ResourceModified': True, # also a special case, because we forcibly add a reference
-			# inside all templates
+			'None': True, 'True': True, 'False': True, # constants that are defined but arent in builtins
 		}
 		# seenFuncs is a map of the functions that are defined in the template ("def foo(): ...")
 		self.seenFuncs = {}
