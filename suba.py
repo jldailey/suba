@@ -12,22 +12,22 @@ __all__ = ['template']
 # q, and m, are added by suba
 type_re = re.compile("[0-9.#0+ -]*[diouxXeEfFgGcrsqm]")
 
-class TemplateFormatError(Exception): pass # fatal, caused by parsing failure, raises to caller
-class TemplateResourceModified(Exception): pass # non-fatal, causes refresh from disk
+class FormatError(Exception): pass # fatal, caused by parsing failure, raises to caller
+class ResourceModified(Exception): pass # non-fatal, causes refresh from disk
 
 def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", base_path=".", skipCache=False, **kw):
 	"""
 		Fast template engine, does very simple parsing and then generates the AST tree directly.
 		The AST tree is compiled to bytecode and cached (so only the first run of a template must compile).
 		The code cache is in-memory only.
-	
+
 		The most basic syntax is similar to the % string substitution operator, but without the trailing type indicator.
 		The template itself returns a generator, so you must read it out with something that will iterate it.
 		Typically, one would just join() it all, but you could also flush each block directly if you wanted.
 
 		>>> ''.join(template(text="<p>%(name)s</p>", name="John"))
 		'<p>John</p>'
-		
+
 		The 'm' type specifier will escape multiline strings.
 
 		>>> ''.join(template(text="%(foo)m", foo=""\"Line 1:
@@ -48,7 +48,7 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		>>> ''.join(template(filename="_test_file_", name="Jacob"))
 		'<p>Jacob</p>'
 		>>> os.unlink("_test_file_")
-		
+
 		The more advanced syntax is just embedded python, with one rule for handling indents:
 		 - Lines that end in ':' increase the indent of all following statements until a %/ is reached.
 
@@ -176,9 +176,8 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		IndentationError: unexpected indent
 		>>> try: os.remove("_test/errors.suba")
 		... except: pass
-		
-		TODO: more tests of this line number stuff, such as with includes, etc.
 
+		TODO: more tests of this line number stuff, such as with includes, etc.
 	"""
 	path = base_path.split(os.path.sep)
 
@@ -191,7 +190,7 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		h = text.__hash__()
 	else:
 		raise ArgumentError("template() requires either text= or filename= arguments.")
-	
+
 	## Compile Phase ##
 	# note about performance: compiling time is one-time only, so on scale it matters very very little.
 	# what matters is the execution of the generated code.
@@ -214,16 +213,16 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 	## Execution Phase ##
 	# provide a few global helpers and then execute the cached byte code
 	loc = {}
-	glob = {'TemplateResourceModified':TemplateResourceModified}
+	glob = {'ResourceModified':ResourceModified}
 	# this executes the Module(), which defines a function inside loc
 	exec(_code_cache[h], glob, loc)
 	# calling execute returns the generator, without having run any of the code inside yet
 	gen = loc['execute'](**kw)
-	# we pull the first item out, causing the preamble to run, yielding either True, or a TemplateResourceModified exception
+	# we pull the first item out, causing the preamble to run, yielding either True, or a ResourceModified exception
 	for err in gen:
 		if err is None:
 			return gen
-		if type(err) == TemplateResourceModified:
+		if type(err) == ResourceModified:
 			# print("Forcing reload.",str(err))
 			del gen
 			return template(text=text, filename=filename, stripWhitespace=stripWhitespace, encoding=encoding, base_path=base_path, skipCache=True, **kw)
@@ -246,16 +245,17 @@ def compile_ast(text, stripWhitespace=False, encoding=None, transform=True, base
 		if expr is not None: # add the ast node to the tree
 			cursor[-1].append(expr)
 		# then adjust the cursor according to motion
-		if motion is MOTION_ASCEND: # _ASCEND closes a block, such as an if, else, etc.
+		if motion is Ascend: # Ascend closes a block, such as an if, else, etc.
 			if len(cursor) < 2:
-				raise TemplateFormatError("Too many closings tags ('%/')")
+				raise FormatError("Too many closings tags ('%/')")
 			# before we ascend, make sure all the Expr's in the about-to-be-closed body are yielding
 			_yieldall(cursor[-1])
 			cursor = cursor[:-1]
-		elif motion is MOTION_DESCEND: # _DESCEND puts the cursor in a .body
+		elif motion is Descend: # Descend opens a new block, and puts the cursor inside
 			cursor.append(expr.body) # (if, def, with, try, except, etc. all work this way)
-			del cursor[-1][0] # the temporary 'pass' statement
-		elif motion is MOTION_ELSE_DESCEND: # _ELSE_DESCEND is used for else and elif
+			del cursor[-1][0] # delete the temporary 'pass' statement
+		elif motion is ElseDescend: # ElseDescend is used for else and elif
+			# it just steps the cursor sideways, to the else block
 			cursor[-1] = cursor[-2][-1].orelse
 
 	ast.fix_missing_locations(head)
@@ -266,7 +266,7 @@ def compile_ast(text, stripWhitespace=False, encoding=None, transform=True, base
 			Import(names=[alias(name='os', asname=None, lineno=0, col_offset=0)], lineno=0, col_offset=0),
 		] + head.body[0].body
 		# patch up the generated tree, to reference the keyword arguments when necessary, etc
-		t = TemplateTransformer(stripWhitespace, encoding, base_path)
+		t = Transformer(stripWhitespace, encoding, base_path)
 		head = t.visit(head)
 		# any includes that were inlined during the transform will add freshness checks to t.preamble
 		# if the checks fail, they will yield an exception (not raise it)
@@ -311,7 +311,7 @@ def gen_chunks(text, start=0):
 		if text[i+1] == '(':
 			m = match_forward(text, ')', '(', start=i+2)
 			if m == -1:
-				raise TemplateFormatError("Unmatched %%( starting at '%s'" % text[i:i+40])
+				raise FormatError("Unmatched %%( starting at '%s'" % text[i:i+40])
 			text_part = text[m+1:]
 			type_part = None
 			ma = type_re.match(text_part)
@@ -327,16 +327,15 @@ def gen_chunks(text, start=0):
 			yield '%', None
 			start = i + 1
 
-MOTION_NONE = 0
-MOTION_ASCEND = 1
-MOTION_DESCEND = 2
-MOTION_ELSE_DESCEND = 3
-MOTION_ELIF_DESCEND = 4
+class NoMotion: pass
+class Ascend: pass
+class Descend: pass
+class ElseDescend: pass
 
 def gen_ast(chunks):
 	""" Given a chunks iterable, yields a series of [<ast>,<motion>] pairs.
-		>>> [ (ast.dump(x),y) for x,y in gen_ast(gen_chunks("abc%(123)def%g")) ]
-		[("Expr(value=Yield(value=Str(s='abc')))", 0), ("Expr(value=Yield(value=BinOp(left=Str(s='%d'), op=Mod(), right=Num(n=123))))", 0), ("Expr(value=Yield(value=Str(s='ef%g')))", 0)]
+		>>> [ (ast.dump(x),y.__name__) for x,y in gen_ast(gen_chunks("abc%(123)def%g")) ]
+		[("Expr(value=Yield(value=Str(s='abc')))", 'NoMotion'), ("Expr(value=Yield(value=BinOp(left=Str(s='%d'), op=Mod(), right=Num(n=123))))", 'NoMotion'), ("Expr(value=Yield(value=Str(s='ef%g')))", 'NoMotion')]
 	"""
 	stack = []
 	lineno = 0
@@ -349,7 +348,7 @@ def gen_ast(chunks):
 		if chunk[0] in ('/','('):
 			# yield any text on the stack first
 			if len(stack) > 0:
-				yield Expr(value=Yield(value=Str(s=''.join(stack)))), MOTION_NONE
+				yield Expr(value=Yield(value=Str(s=''.join(stack)))), NoMotion
 				stack = []
 		else:
 			if len(chunk) > 0:
@@ -357,27 +356,27 @@ def gen_ast(chunks):
 				stack.append(chunk)
 
 		if chunk[0] == '/':
-			yield None, MOTION_ASCEND
+			yield None, Ascend
 			if len(chunk) > 1:
 				lineno += linecount(chunk)
-				yield Expr(value=Yield(value=Str(s=chunk[1:]))), MOTION_NONE
+				yield Expr(value=Yield(value=Str(s=chunk[1:]))), NoMotion
 		elif chunk[0] == '(':
-			motion = MOTION_NONE
+			motion = NoMotion
 			node = None
 			# eval the middle
 			eval_part = chunk[1:-1]
 
 			if eval_part.endswith(":"): # if the statement to eval is like an if, while, or for, then we need to do some tricks
 				eval_part += " pass" # add a temp. node, so we can parse the incomplete statement
-				motion = MOTION_DESCEND
-			
+				motion = Descend
+
 			if eval_part.startswith("else:"):
-				motion = MOTION_ELSE_DESCEND
+				motion = ElseDescend
 			else:
 				if eval_part.startswith("elif "):
-					yield None, MOTION_ELSE_DESCEND # yield an immediate else descend
-					motion = MOTION_DESCEND # then the 'if' statement from this line will descend regularly
+					yield None, ElseDescend # yield an immediate else descend
 					eval_part = eval_part[2:] # chop off the 'el' so we parse as a regular 'if' statement
+					motion = Descend # then the 'if' statement from this line will descend regularly
 				try: # parse the eval_part
 					body = ast.parse(eval_part).body
 					if len(body) > 0: # a block with no expressions (e.g., it was all comments) will have no nodes and can be skipped
@@ -412,7 +411,7 @@ def gen_ast(chunks):
 
 	if len(stack) > 0:
 		# yield the remaining text
-		yield Expr(value=Yield(value=Str(s=''.join(stack)))), MOTION_NONE
+		yield Expr(value=Yield(value=Str(s=''.join(stack)))), NoMotion
 
 def gen_bytes(gen, encoding):
 	for item in gen:
@@ -433,13 +432,13 @@ def match_forward(text, find, against, start=0, stop=-1):
 			return i
 	return -1
 
-class TemplateTransformer(ast.NodeTransformer):
+class Transformer(ast.NodeTransformer):
 	def __init__(self, stripWhitespace=False, encoding=None, base_path=None):
 		ast.NodeTransformer.__init__(self)
 		# seenStore is a map of variables that are created within the template (not passed in)
 		self.seenStore = {
 			'args': True, # 'args' is a special identifier that refers to the keyword argument dict
-			'TemplateResourceModified': True, # also a special case, because we forcibly add a reference
+			'ResourceModified': True, # also a special case, because we forcibly add a reference
 			# inside all templates
 		}
 		# seenFuncs is a map of the functions that are defined in the template ("def foo(): ...")
@@ -454,42 +453,41 @@ class TemplateTransformer(ast.NodeTransformer):
 		"""
 		if type(node.value) is Call:
 			call = node.value
-			if type(call.func) is Name:
-				if call.func.id == 'include': 
-					if len(call.args) < 1:
-						raise TemplateFormatError("include requires at least a filename as an argument.")
-					base_path = None
-					# if the original call to include had an additional argument
-					# use that argument as the base_path
-					# print('call',ast.dump(call))
-					if len(call.args) > 1:
-						base_path = call.args[1].s
-					# or if there was a base_path= kwarg provided, use that
-					elif len(call.keywords) > 0:
-						for k in call.keywords:
-							if k.arg == "base_path":
-								base_path = k.value.s
-					if base_path is None:
-						# if we didn't get one from the call to include
-						# look for one that was given as an argument to the template() call
-						base_path = self.base_path
-					if type(base_path) is str:
-						base_path = base_path.split(os.path.sep)
-					# the first argument to include() is the filename
-					template_name = call.args[0].s
-					# get the ast tree that comes from this included file
-					check, fundef = include_ast(template_name, base_path)
-					# each include produces the code to execute, plus some code to check for freshness
-					# this code absolutely must run first, because we can't restart the generator once it has already yielded
-					self.preamble.append(check)
-					if fundef is None:
-						raise TemplateFormatError("include_ast returned None")
-					# return a copy of the the cached ast tree, because it will be further modified to fit with the including template
-					fundef = copy.deepcopy(fundef)
-					_yieldall(fundef.body)
-					for expr in fundef.body:
-						self.generic_visit(expr)
-					return fundef.body
+			if type(call.func) is Name and call.func.id == 'include': 
+				if len(call.args) < 1:
+					raise FormatError("include requires at least a filename as an argument.")
+				base_path = None
+				# if the original call to include had an additional argument
+				# use that argument as the base_path
+				# print('call',ast.dump(call))
+				if len(call.args) > 1:
+					base_path = call.args[1].s
+				# or if there was a base_path= kwarg provided, use that
+				elif len(call.keywords) > 0:
+					for k in call.keywords:
+						if k.arg == "base_path":
+							base_path = k.value.s
+				if base_path is None:
+					# if we didn't get one from the call to include
+					# look for one that was given as an argument to the template() call
+					base_path = self.base_path
+				if type(base_path) is str:
+					base_path = base_path.split(os.path.sep)
+				# the first argument to include() is the filename
+				template_name = call.args[0].s
+				# get the ast tree that comes from this included file
+				check, fundef = include_ast(template_name, base_path)
+				# each include produces the code to execute, plus some code to check for freshness
+				# this code absolutely must run first, because we can't restart the generator once it has already yielded
+				self.preamble.append(check)
+				if fundef is None:
+					raise FormatError("include_ast returned None")
+				# return a copy of the the cached ast tree, because it will be further modified to fit with the including template
+				fundef = copy.deepcopy(fundef)
+				_yieldall(fundef.body)
+				for expr in fundef.body:
+					self.generic_visit(expr)
+				return fundef.body
 		elif type(node.value) is Yield:
 			y = node.value
 			if type(y.value) == Str:
@@ -517,7 +515,7 @@ class TemplateTransformer(ast.NodeTransformer):
 		_yieldall(node.body)
 		self.generic_visit(node)
 		return node
-	
+
 	def visit_Import(self, node):
 		for name in node.names:
 			if name.asname is not None:
@@ -593,10 +591,10 @@ def _compareMtime(full_name, mtime):
 		comparators=[Num(n=mtime)])
 def _checkMtimeAndYield(full_name, mtime):
 	""" if os.path.getmtime(full_name) > mtime:
-		yield TemplateResourceModified(full_name)
+		yield ResourceModified(full_name)
 	""" # static checks like this are compiled into the top of include trees
 	return If(test=_compareMtime(full_name, mtime), body=[
-		Expr(value=Yield(value=Call(func=Name(id='TemplateResourceModified', ctx=Load(), lineno=0), 
+		Expr(value=Yield(value=Call(func=Name(id='ResourceModified', ctx=Load(), lineno=0), 
 			args=[Str(s=full_name)], keywords=[], starargs=None, kwargs=None)))
 	], orelse=[])
 def _yieldall(body):
@@ -610,23 +608,3 @@ def _yieldall(body):
 if __name__ == "__main__":
 	import doctest
 	doctest.testmod(raise_on_error=False)
-	text = """abc%(123)def%g
-	%(if True:)
-	yes
-	%(elif False:)
-	elif here
-	%(else:)
-	no
-	%/
-	print(text)
-	for node, dir in gen_ast(gen_chunks(text)):
-		if node is not None:
-			print(ast.dump(node), dir)
-		else:
-			print(node,dir)
-
-	print(ast.dump(compile_ast(text)))
-	print(list(gen_chunks(text)))
-	print(list(gen_chunks("abc%(123)def%g")))
-	print(list(gen_ast(gen_chunks("<ul>%(for item in items:)<li>%(item)s</li>%/</ul>"))))
-	"""
