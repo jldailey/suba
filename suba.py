@@ -25,7 +25,7 @@ MOTION_ASCEND = 1
 MOTION_DESCEND = 2
 MOTION_ELSE_DESCEND = 3
 
-def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", base_path=".", skipCache=False, **kw):
+def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", root=".", skipCache=False, **kw):
 	"""
 		Fast template engine, does very simple parsing and then generates the AST tree directly.
 		The AST tree is compiled to bytecode and cached (so only the first run of a template must compile).
@@ -111,11 +111,11 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		>>> ''.join(template(text="<p>%(include('_test/included.suba'))</p>", name="John"))
 		'<p>This is a special message for John.</p>'
 
-		You can specify a base_path, a location to find templates, in three ways. (default is '.')
+		You can specify a root, a location to find templates, in three ways. (default is '.')
 
 		1. As a keyword argument to template().
 
-		>>> ''.join(template(text="<p>%(include('included.suba'))</p>", base_path="_test", name="Peter"))
+		>>> ''.join(template(text="<p>%(include('included.suba'))</p>", root="_test", name="Peter"))
 		'<p>This is a special message for Peter.</p>'
 
 		2. As a regular argument to include() within the template itself.
@@ -125,7 +125,7 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 
 		3. As a keyword argument to include() within the template.
 
-		>>> ''.join(template(text="<p>%(include('included.suba', base_path='_test'))</p>", name="Mary"))
+		>>> ''.join(template(text="<p>%(include('included.suba', root='_test'))</p>", name="Mary"))
 		'<p>This is a special message for Mary.</p>'
 
 		If the file changes, the cache automatically updates on the next call.
@@ -136,7 +136,7 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		>>> f.write("Thank you %(name)s, for the message!")
 		36
 		>>> f.close()
-		>>> ''.join(template(text="<p>%(include('included.suba', base_path='_test'))</p>", name="Mary"))
+		>>> ''.join(template(text="<p>%(include('included.suba', root='_test'))</p>", name="Mary"))
 		'<p>Thank you Mary, for the message!</p>'
 
 		>>> os.remove("_test/included.suba")
@@ -176,7 +176,7 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		... %/""\")
 		78
 		>>> f.close()
-		>>> ''.join(template(filename="errors.suba", base_path="_test"))
+		>>> ''.join(template(filename="errors.suba", root="_test"))
 		Traceback (most recent call last):
 			...
 			File "errors.suba", Line 4
@@ -198,7 +198,7 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		TODO: more tests of this line number stuff, such as with includes, etc.
 		TODO: improve the quality of these lineno tests, as doctest doesn't check the stacktrace
 	"""
-	path = base_path.split(os.path.sep)
+	path = root.split(os.path.sep)
 
 	if text is None and filename is not None:
 		# never allow absolute paths, or '..', in filenames
@@ -222,7 +222,7 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		if filename is None:
 			filename = "<inline_template>"
 		try:
-			head = compile_ast(text, stripWhitespace=stripWhitespace, encoding=encoding, base_path=path)
+			head = compile_ast(text, stripWhitespace=stripWhitespace, encoding=encoding, root=path)
 		except IndentationError as e:
 			e.filename = filename
 			raise
@@ -244,11 +244,11 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", b
 		if type(err) == ResourceModified:
 			# print("Forcing reload.",str(err))
 			del gen
-			return template(text=text, filename=filename, stripWhitespace=stripWhitespace, encoding=encoding, base_path=base_path, skipCache=True, **kw)
+			return template(text=text, filename=filename, stripWhitespace=stripWhitespace, encoding=encoding, root=root, skipCache=True, **kw)
 		raise Exception("execute did not return a proper generator, first value was:",err)
 
 
-def compile_ast(text, stripWhitespace=False, encoding=None, transform=True, base_path=None):
+def compile_ast(text, stripWhitespace=False, encoding=None, transform=True, root=None):
 	"Builds a Module ast tree.	Containing a single function: execute, a generator function."
 	head = Module(body=[ 
 		# build the first node of the new code tree
@@ -284,7 +284,7 @@ def compile_ast(text, stripWhitespace=False, encoding=None, transform=True, base
 			Import(names=[alias(name='os', asname=None, lineno=0, col_offset=0)], lineno=0, col_offset=0),
 		] + head.body[0].body
 		# patch up the generated tree, to reference the keyword arguments when necessary, etc
-		t = Transformer(stripWhitespace, encoding, base_path)
+		t = Transformer(stripWhitespace, encoding, root)
 		head = t.visit(head)
 		# any includes that were inlined during the transform will add freshness checks to t.preamble
 		# if the checks fail, they will yield an exception (not raise it)
@@ -476,7 +476,7 @@ def match_forward(text, find, against, start=0, stop=-1):
 	return -1
 
 class Transformer(ast.NodeTransformer):
-	def __init__(self, stripWhitespace=False, encoding=None, base_path=None):
+	def __init__(self, stripWhitespace=False, encoding=None, root=None):
 		ast.NodeTransformer.__init__(self)
 		# seenStore is a map of variables that are created within the template (not passed in)
 		self.seenStore = {
@@ -488,7 +488,7 @@ class Transformer(ast.NodeTransformer):
 		self.seenFuncs = {}
 		self.encoding = encoding
 		self.stripWhitespace = stripWhitespace
-		self.base_path = base_path if base_path is not None else []
+		self.root = root if root is not None else []
 		self.preamble = []
 
 	def visit_Expr(self, node):
@@ -499,27 +499,27 @@ class Transformer(ast.NodeTransformer):
 			if type(call.func) is Name and call.func.id == 'include': 
 				if len(call.args) < 1:
 					raise FormatError("include requires at least a filename as an argument.")
-				base_path = None
+				root = None
 				# if the original call to include had an additional argument
-				# use that argument as the base_path
+				# use that argument as the root
 				# print('call',ast.dump(call))
 				if len(call.args) > 1:
-					base_path = call.args[1].s
-				# or if there was a base_path= kwarg provided, use that
+					root = call.args[1].s
+				# or if there was a root= kwarg provided, use that
 				elif len(call.keywords) > 0:
 					for k in call.keywords:
-						if k.arg == "base_path":
-							base_path = k.value.s
-				if base_path is None:
+						if k.arg == "root":
+							root = k.value.s
+				if root is None:
 					# if we didn't get one from the call to include
 					# look for one that was given as an argument to the template() call
-					base_path = self.base_path
-				if type(base_path) is str:
-					base_path = base_path.split(os.path.sep)
+					root = self.root
+				if type(root) is str:
+					root = root.split(os.path.sep)
 				# the first argument to include() is the filename
 				template_name = call.args[0].s
 				# get the ast tree that comes from this included file
-				check, fundef = include_ast(template_name, base_path)
+				check, fundef = include_ast(template_name, root)
 				# each include produces the code to execute, plus some code to check for freshness
 				# this code absolutely must run first, because we can't restart the generator once it has already yielded
 				self.preamble.append(check)
@@ -600,10 +600,10 @@ def strip_whitespace(s):
 	return out.getvalue()
 
 _code_cache = {}
-def include_ast(filename, base_path=None):
-	if base_path is None:
-		base_path = []
-	full_name = os.path.sep.join(base_path + [f for f in filename.split(os.path.sep) if f != '..' and f != ''])
+def include_ast(filename, root=None):
+	if root is None:
+		root = []
+	full_name = os.path.sep.join(root + [f for f in filename.split(os.path.sep) if f != '..' and f != ''])
 	h = full_name.__hash__()
 	m = os.path.getmtime(full_name)
 	h += m
