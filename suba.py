@@ -261,13 +261,14 @@ def compile_ast(text, stripWhitespace=False, encoding=None, transform=True, root
 	cursor.append(head.body[0].body)
 	# gets a series of ast,motion pairs from the gen_ast generator
 	for expr, motion in gen_ast(gen_chunks(text)):
+		# print("expr: %s motion: %s" % (expr, motion))
 		if expr is not None: # add the ast node to the tree
 			cursor[-1].append(expr)
 			# print("compile_ast:",ast.dump(expr, include_attributes=True))
 		# then adjust the cursor according to motion
 		if motion is Ascend: # Ascend closes a block, such as an if, else, etc.
 			if len(cursor) < 2:
-				raise FormatError("Too many closings tags ('%/')")
+				raise FormatError("Too many closings tags ('%%/'), cursor: %s" % (cursor, ))
 			# before we ascend, make sure all the Expr's in the about-to-be-closed body are yielding
 			_yieldall(cursor[-1])
 			cursor = cursor[:-1]
@@ -322,6 +323,7 @@ def gen_chunks(text, start=0):
 
 	while -1 < start < len(text):
 		i = text.find(OPEN_MARK,start)
+		# print("i = %d, text[...] = %s" % (i, text[i-3:i+4]))
 		if i == -1:
 			yield text[start:], None
 			break
@@ -329,7 +331,7 @@ def gen_chunks(text, start=0):
 		if text[i+1] == OPEN_PAREN:
 			m = match_forward(text, CLOSE_PAREN, OPEN_PAREN, start=i+2)
 			if m == -1:
-				raise FormatError("Unmatched %s( starting at '%s'" % (OPEN_MARK, text[i:i+40]))
+				raise FormatError("Unmatched %s%s starting at '%s'" % (OPEN_MARK, OPEN_PAREN, text[i:i+40]))
 			text_part = text[m+1:]
 			type_part = None
 			ma = type_re.match(text_part)
@@ -368,6 +370,8 @@ def gen_ast(chunks):
 				node.col_offset = 0
 		return n
 
+	first_chunk = True # used to prevent getting tripped up on files whose first char is '/' (like a source file with comments)
+	#TODO is a better solution to this... the gen_chunks should probably yield the full "%/" instead of just "/" so its easier to detect here
 	for chunk, type_part in chunks:
 
 		# ignore empty chunks
@@ -377,6 +381,7 @@ def gen_ast(chunks):
 		# if it's a plain piece of text
 		if chunk[0] not in (CLOSE_MARK, OPEN_PAREN):
 			stack.append(chunk) # stack it up for later
+			first_chunk = False
 			continue # get the next chunk
 		# otherwise, it is something we will need to eval
 
@@ -389,8 +394,10 @@ def gen_ast(chunks):
 			stack = []
 
 		# if it's a close marker
-		if chunk[0] == CLOSE_MARK:
+		if chunk[0] == CLOSE_MARK and not first_chunk:
+			# yield the Ascend motion for the cursor
 			yield None, Ascend
+			# and if there is any text after the close
 			if len(chunk) > 1:
 				stack.append(chunk[1:]) # stack it for later
 
@@ -451,6 +458,7 @@ def gen_ast(chunks):
 			# yield the parsed node
 			# print("gen_ast:", ast.dump(node, include_attributes=True))
 			yield node, motion
+		first_chunk = False
 
 	if len(stack) > 0:
 		# yield the remaining text
