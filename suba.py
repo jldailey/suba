@@ -10,7 +10,7 @@ __all__ = ['template']
 
 # to get complete compliance with all of python's type specifiers, we use a small regex
 # q, and m, are added by suba
-type_re = re.compile("[0-9.#0+ -]*[diouxXeEfFgGcrsqm]")
+type_re = re.compile("[0-9.#0+-]*[diouxXeEfFgGcrsqm]")
 
 class FormatError(Exception): pass # fatal, caused by parsing failure, raises to caller
 class ResourceModified(Exception): pass # non-fatal, causes refresh from disk
@@ -319,6 +319,17 @@ def gen_chunks(text, start=0):
 		>>> list(gen_chunks("<ul>%(for item in items:)<li>%(item)s</li>%/</ul>"))
 		[('<ul>', None), ('(for item in items:)', None), ('<li>', None), ('(item)', 's'), ('</li>', None), ('/', None), ('</ul>', None)]
 
+		Test for a parse error condition
+
+		>>> list(gen_chunks("<ul>%(for item in items:)<li>%(item)s</li>%//</ul>"))
+		[('<ul>', None), ('(for item in items:)', None), ('<li>', None), ('(item)', 's'), ('</li>', None), ('/', None), ('/</ul>', None)]
+
+		>>> list(gen_chunks("/<ul>%(for item in items:)<li>%(item)s</li>%//</ul>"))
+		[('/<ul>', None), ('(for item in items:)', None), ('<li>', None), ('(item)', 's'), ('</li>', None), ('/', None), ('/</ul>', None)]
+
+		>>> list(gen_chunks("(<ul>%(for item in items:)<li>%(item)s</li>%//</ul>"))
+		[('(<ul>', None), ('(for item in items:)', None), ('<li>', None), ('(item)', 's'), ('</li>', None), ('/', None), ('/</ul>', None)]
+
 	"""
 
 	while -1 < start < len(text):
@@ -357,8 +368,17 @@ def linecount(t):
 
 def gen_ast(chunks):
 	""" Given a chunks iterable, yields a series of [<ast>,<motion>] pairs.
+
 		>>> [ (ast.dump(x),y.__name__) for x,y in gen_ast(gen_chunks("abc%(123)def%g")) ]
 		[("Expr(value=Yield(value=Str(s='abc')))", 'NoMotion'), ("Expr(value=Yield(value=BinOp(left=Str(s='%d'), op=Mod(), right=Num(n=123))))", 'NoMotion'), ("Expr(value=Yield(value=Str(s='ef%g')))", 'NoMotion')]
+
+		>>> list(gen_chunks("/*comment*/%(for i in range(1):) foo%//*comment2*/"))
+		[('/*comment*/', None), ('(for i in range(1):)', None), (' foo', None), ('/', None), ('/*comment2*/', None)]
+	
+
+		>>> [ (ast.dump(x),y.__name__) for x,y in gen_ast(gen_chunks("/*comment*/%('foo')")) ]
+		[("Expr(value=Yield(value=Str(s='/*comment*/')))", 'NoMotion'), ("Expr(value=Str(s='foo'))", 'NoMotion')]
+
 	"""
 	stack = []
 	lineno = 1
@@ -370,8 +390,6 @@ def gen_ast(chunks):
 				node.col_offset = 0
 		return n
 
-	first_chunk = True # used to prevent getting tripped up on files whose first char is '/' (like a source file with comments)
-	#TODO is a better solution to this... the gen_chunks should probably yield the full "%/" instead of just "/" so its easier to detect here
 	for chunk, type_part in chunks:
 
 		# ignore empty chunks
@@ -381,7 +399,6 @@ def gen_ast(chunks):
 		# if it's a plain piece of text
 		if chunk[0] not in (CLOSE_MARK, OPEN_PAREN):
 			stack.append(chunk) # stack it up for later
-			first_chunk = False
 			continue # get the next chunk
 		# otherwise, it is something we will need to eval
 
@@ -394,7 +411,7 @@ def gen_ast(chunks):
 			stack = []
 
 		# if it's a close marker
-		if chunk[0] == CLOSE_MARK and not first_chunk:
+		if chunk == CLOSE_MARK:
 			# yield the Ascend motion for the cursor
 			yield None, Ascend
 			# and if there is any text after the close
@@ -458,7 +475,8 @@ def gen_ast(chunks):
 			# yield the parsed node
 			# print("gen_ast:", ast.dump(node, include_attributes=True))
 			yield node, motion
-		first_chunk = False
+		else:
+			stack.append(chunk)
 
 	if len(stack) > 0:
 		# yield the remaining text
