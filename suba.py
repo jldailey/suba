@@ -20,10 +20,13 @@ OPEN_MARK = '%'
 OPEN_PAREN = '('
 CLOSE_PAREN = ')'
 
-MOTION_NONE = 0
-MOTION_ASCEND = 1
-MOTION_DESCEND = 2
-MOTION_ELSE_DESCEND = 3
+# by default a CLOSE_MARK will close 1 body, but in the case of elif, it might need to close more
+ASCEND_COUNT = 1
+
+class NoMotion: pass
+class Ascend: pass
+class Descend: pass
+class ElseDescend: pass
 
 def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", root=".", skipCache=False, **kw):
 	"""
@@ -247,9 +250,9 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", r
 			return template(text=text, filename=filename, stripWhitespace=stripWhitespace, encoding=encoding, root=root, skipCache=True, **kw)
 		raise Exception("execute did not return a proper generator, first value was:",err)
 
-
 def compile_ast(text, stripWhitespace=False, encoding=None, transform=True, root=None):
 	"Builds a Module ast tree.	Containing a single function: execute, a generator function."
+	global ASCEND_COUNT
 	head = Module(body=[ 
 		# build the first node of the new code tree
 		# which will be a module with a single function: 'execute', a generator function
@@ -269,9 +272,11 @@ def compile_ast(text, stripWhitespace=False, encoding=None, transform=True, root
 		if motion is Ascend: # Ascend closes a block, such as an if, else, etc.
 			if len(cursor) < 2:
 				raise FormatError("Too many closings tags ('%%/'), cursor: %s" % (cursor, ))
-			# before we ascend, make sure all the Expr's in the about-to-be-closed body are yielding
-			_yieldall(cursor[-1])
-			cursor = cursor[:-1]
+			# as we ascend, make sure all the Expr's in the about-to-be-closed body are yielding
+			for _ in range(ASCEND_COUNT):
+				_yieldall(cursor[-1])
+				cursor = cursor[:-1]
+			ASCEND_COUNT = 1
 		elif motion is Descend: # Descend opens a new block, and puts the cursor inside
 			cursor.append(expr.body) # (if, def, with, try, except, etc. all work this way)
 			del cursor[-1][0] # delete the temporary 'pass' statement
@@ -299,6 +304,7 @@ def compile_ast(text, stripWhitespace=False, encoding=None, transform=True, root
 		# then fill in any missing lineno, col_offsets so that compile() wont complain
 		ast.fix_missing_locations(head)
 
+	# print("COMPILED: ", ast.dump(head))
 	return head
 
 def gen_chunks(text, start=0):
@@ -358,11 +364,6 @@ def gen_chunks(text, start=0):
 			yield OPEN_MARK, None
 			start = i + 1
 
-class NoMotion: pass
-class Ascend: pass
-class Descend: pass
-class ElseDescend: pass
-
 def linecount(t):
 	return max(t.count('\r'),t.count('\n'))
 
@@ -380,6 +381,7 @@ def gen_ast(chunks):
 		[("Expr(value=Yield(value=Str(s='/*comment*/')))", 'NoMotion'), ("Expr(value=Str(s='foo'))", 'NoMotion')]
 
 	"""
+	global ASCEND_COUNT
 	stack = []
 	lineno = 1
 	# a closure to assign the lineno to all nodes
@@ -436,6 +438,7 @@ def gen_ast(chunks):
 					yield None, ElseDescend # yield an immediate else descend
 					eval_part = eval_part[2:] # chop off the 'el' so we parse as a regular 'if' statement
 					motion = Descend # then the 'if' statement from this line will descend regularly
+					ASCEND_COUNT += 1
 				try: # parse the eval_part
 					body = ast.parse(eval_part).body
 					if len(body) > 0: # a block with no expressions (e.g., it was all comments) will have no nodes and can be skipped
