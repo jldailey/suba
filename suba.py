@@ -1,3 +1,4 @@
+#!/usr/bin/env python3.1
 """
 	Fast template engine, does very simple parsing (no regex, one split) and then generates the AST tree directly.
 	The AST tree is compiled to bytecode and cached (so only the first run of a template must compile).
@@ -6,10 +7,10 @@
 import re, io, os, ast, builtins, copy, time
 from ast import *
 
-__all__ = ['template']
+__all__ = ['template', 'synth']
 
 # to get complete compliance with all of python's type specifiers, we use a small regex
-# q, and m, are added by suba
+# q and m, are added by suba
 type_re = re.compile("[0-9.#0+-]*[diouxXeEfFgGcrsqm]")
 
 class FormatError(Exception): pass # fatal, caused by parsing failure, raises to caller
@@ -657,6 +658,7 @@ def _multiline(node):
 	""" node.replace('\n','\\n') """
 	return Expr(value=_call(_replace(node), [Str(s='\n'),Str(s="\\\n")]))
 def _compareMtime(full_name, mtime):
+	""" os.path.getmtime(full_name) > mtime """
 	return Compare(left=Call(func=Attribute(value=Attribute(value=Name(id='os', ctx=Load(), lineno=0), attr='path', ctx=Load()), 
 		attr='getmtime', ctx=Load()), args=[Str(s=full_name)], keywords=[], starargs=None, kwargs=None), 
 		ops=[Gt()], 
@@ -676,6 +678,160 @@ def _yieldall(body):
 			if type(expr.value) != Yield and not (type(expr.value) is Call and type(expr.value.func) is Name and expr.value.func.id is 'include'):
 				new = Yield(value=expr.value)
 				body[i].value = ast.copy_location(new, expr.value)
+
+# the absolute bare minimum idea of a DOM node
+# a structure used for building a tree and dumping a string
+class Node:
+	def __init__(self, tagName):
+		self.tagName = tagName
+		self.parentNode = None
+		self.id = None
+		self.className = None
+		self.attrs = {}
+		self.childNodes = []
+	def setAttribute(self, k, v):
+		self.attrs[k] = v
+	def appendChild(self, n):
+		self.childNodes.append(n)
+		n.parentNode = self
+		return n
+	def __str__(self):
+		return "<%(tagName)s%(id)s%(cls)s%(attrs)s>%(children)s</%(tagName)s>" % {
+			'tagName': self.tagName,
+			'id':' id="%s"' % self.id if self.id else "",
+			'cls':' class="%s"' % self.className if self.className else "",
+			'attrs':"".join([' %s="%s"' % (k,v) for k,v in self.attrs.items()]),
+			'children':"".join([str(child) for child in self.childNodes]),
+		}
+	def __repr__(self):
+		return str(self)
+
+class TextNode:
+	def __init__(self, text):
+		self.text = text
+	def __str__(self):
+		return self.text
+	def __repr__(self):
+		return self.text
+
+def synth(expr):
+	""" A state-machine parser for generating Nodes from CSS expressions. 
+		Returns a generator that must be read to completion.
+
+		>>> synth("div#foo")
+		[<div id="foo"></div>]
+
+		>>> synth("div.bar")
+		[<div class="bar"></div>]
+
+		>>> synth("a[href=#home]")
+		[<a href="#home"></a>]
+
+		>>> synth("a[href=#home] 'Home Link'")
+		[<a href="#home">Home Link</a>]
+
+		>>> synth("div p span a[href=#home] 'Home Link' + a[href=#logout] 'Logout Link'")
+		[<div><p><span><a href="#home">Home Link</a><a href="#logout">Logout Link</a></span></p></div>]
+
+		>>> synth("div p span 'Here' + + p span 'There'")
+		[<div><p><span>Here</span></p><p><span>There</span></p></div>]
+
+		>>> synth("div, span")
+		[<div></div>, <span></span>]
+
+		>>> synth('div#id1.class1[a=b][k=v], div#id2.class2[href="home, on the range"] "some inner, text" span "span, text" + sub "sub text"')
+		[<div id="id1" class="class1" a="b" k="v"></div>, <div id="id2" class="class2" href=""home, on the range"">some inner, text<span>span, text</span><sub>sub text</sub></div>]
+
+		>>> synth("div#id1.class1[a=b][k=v], div#id2.class2[href='home, on the range'] 'some inner, text' span 'span, text' + sub 'sub text'")
+		[<div id="id1" class="class1" a="b" k="v"></div>, <div id="id2" class="class2" href="'home, on the range'">some inner, text<span>span, text</span><sub>sub text</sub></div>]
+
+		>>> synth("div#%(id)s")
+		[<div id="%(id)s"></div>]
+
+		>>> synth("div#%(id)s.%(cls)s[%(k)s=%(v)s] '%(data)s'")
+		[<div id="%(id)s" class="%(cls)s" %(k)s="%(v)s">%(data)s</div>]
+
+	"""
+	# the final result
+	ret = []
+	# the buffers to store characters in
+	tagname, id, cls, attr, val, text = [io.StringIO() for _ in range(6)]
+	qmode = None # one of: None, ", or '; represents what the text element is opened/closed with
+	attrs = {}
+	parent = None
+	target = tagname
+	# feed each character to the machine
+	for c in expr:
+		# print(c, target, parent)
+		if c == '+' and target in (tagname,):
+			if parent is not None:
+				parent = parent.parentNode
+		elif c == '#' and target in (tagname,cls,attr):
+			target = id
+		elif c == '.' and target in (tagname,id,attr):
+			target = cls
+		elif c == '[' and target in (tagname,id,cls,attr):
+			target = attr
+		elif c == '=' and target in (attr,):
+			target = val
+		elif c == ']' and target in (attr, val):
+			attrs[attr.getvalue()] = val.getvalue()
+			[(x.truncate(0) | x.seek(0,2)) for x in (attr, val)]
+			target = tagname
+		elif c in ('"',"'") and target in (tagname,):
+			target = text
+			qmode = c
+		elif c == qmode and target in (text,):
+			node = TextNode(text.getvalue())
+			if parent is not None:
+				parent.appendChild(node)
+			else:
+				ret.append(node)
+			target = tagname
+			text.truncate(0)
+			text.seek(0,2)
+			qmode = None
+		elif c in (' ', ',') and target not in (val, text) and tagname.tell() > 0:
+			node = Node(tagname.getvalue())
+			node.id = id.getvalue()
+			node.className = cls.getvalue()
+			node.attrs = attrs
+			if parent is not None:
+				parent.appendChild(node)
+			else:
+				ret.append(node)
+			if c == ',':
+				parent = None
+			elif c == ' ':
+				parent = node
+			[(x.truncate(0) | x.seek(0,2)) \
+				for x in (tagname, id, cls, attr, val, text)]
+			attrs = {}
+			target = tagname
+		elif target == tagname:
+			if c != ' ':
+				tagname.write(c)
+		elif target in (id, cls, attr, val, text):
+			target.write(c)
+		else:
+			raise ParseError("Undefined input/state: '%s'/%s" % (c,target))
+	if tagname.tell() > 0:
+		node = Node(tagname.getvalue())
+		node.id = id.getvalue()
+		node.className = cls.getvalue()
+		node.attrs = attrs
+		if parent is not None:
+			parent.appendChild(node)
+		else:
+			ret.append(node)
+	if text.tell() > 0:
+		node = TextNode(text.getvalue())
+		if parent is not None:
+			parent.appendChild(node)
+		else:
+			ret.append(node)
+	return ret
+
 
 if __name__ == "__main__":
 	import doctest
