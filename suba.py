@@ -714,9 +714,9 @@ class TextNode:
 	def __repr__(self):
 		return self.text
 
+_synth_cache = {}
 def synth(expr):
 	""" A state-machine parser for generating Nodes from CSS expressions. 
-		Returns a generator that must be read to completion.
 
 		>>> synth("div#foo")
 		[<div id="foo"></div>]
@@ -752,8 +752,10 @@ def synth(expr):
 		[<div id="%(id)s" class="%(cls)s" %(k)s="%(v)s">%(data)s</div>]
 
 	"""
-	# the final result
-	ret = []
+	# check the cache first
+	ret = _synth_cache.get(expr, [])
+	if len(ret) > 0:
+		return ret
 	# the buffers to store characters in
 	tagname, id, cls, attr, val, text = [io.StringIO() for _ in range(6)]
 	qmode = None # one of: None, ", or '; represents what the text element is opened/closed with
@@ -830,7 +832,9 @@ def synth(expr):
 			parent.appendChild(node)
 		else:
 			ret.append(node)
-	return ret
+	if len(ret) == 1:
+		return str(ret[0])
+	return [str(x) for x in ret]
 
 
 if __name__ == "__main__":
