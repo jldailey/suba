@@ -4,7 +4,7 @@
 	The AST tree is compiled to bytecode and cached (so only the first run of a template must compile).
 	The bytecode cache is in-memory only.
 """
-import re, io, os, ast, builtins, copy, time
+import re, io, os, ast, builtins, copy, time, types
 from ast import *
 
 __all__ = ['template', 'synth']
@@ -91,6 +91,11 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", r
 		'foo is true'
 		>>> ''.join(template(text=t, foo=False, bar=True, stripWhitespace=True))
 		'bar is true'
+
+		You can use generators.
+
+		>>> ''.join(template(text="...%((str(x) for x in range(1,10)))..."))
+		'...123456789...'
 
 		You can import modules and use them in the template.
 
@@ -244,7 +249,7 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", r
 	# we pull the first item out, causing the preamble to run, yielding either True, or a ResourceModified exception
 	for err in gen:
 		if err is None:
-			return gen
+			return flatten_gen(gen)
 		if type(err) == ResourceModified:
 			# print("Forcing reload.",str(err))
 			del gen
@@ -369,7 +374,7 @@ def linecount(t):
 	return max(t.count('\r'),t.count('\n'))
 
 def gen_ast(chunks):
-	""" Given a chunks iterable, yields a series of [<ast>,<motion>] pairs.
+	""" Given an iterable of text chunks, yields a series of [<ast>,<motion>] pairs.
 
 		>>> [ (ast.dump(x),y.__name__) for x,y in gen_ast(gen_chunks("abc%(123)def%g")) ]
 		[("Expr(value=Yield(value=Str(s='abc')))", 'NoMotion'), ("Expr(value=Yield(value=BinOp(left=Str(s='%d'), op=Mod(), right=Num(n=123))))", 'NoMotion'), ("Expr(value=Yield(value=Str(s='ef%g')))", 'NoMotion')]
@@ -617,6 +622,26 @@ class Transformer(ast.NodeTransformer):
 		else: # is Load, but a local variable
 			return node
 
+	def visit_GeneratorExp(self, node):
+		# generator expressions define the variables "out-of-order"
+		# if you say: (x for x in iter), the creation of x appears
+		# "after" the access of x, in text order, so we have to tweak
+		# the generic visit, to visit the creations first, so we dont
+		# try to replace x with args[x]
+		for g in node.generators:
+			self.generic_visit(g)
+		self.generic_visit(node.elt)
+		return node
+
+
+def flatten_gen(gen):
+	for i in gen:
+		if type(i) is types.GeneratorType:
+			for j in i:
+				yield j
+		else:
+			yield i
+
 def strip_whitespace(s):
 	out = io.StringIO()
 	remove = False
@@ -719,37 +744,37 @@ def synth(expr):
 	""" A state-machine parser for generating Nodes from CSS expressions. 
 
 		>>> synth("div#foo")
-		[<div id="foo"></div>]
+		'<div id="foo"></div>'
 
 		>>> synth("div.bar")
-		[<div class="bar"></div>]
+		'<div class="bar"></div>'
 
 		>>> synth("a[href=#home]")
-		[<a href="#home"></a>]
+		'<a href="#home"></a>'
 
 		>>> synth("a[href=#home] 'Home Link'")
-		[<a href="#home">Home Link</a>]
+		'<a href="#home">Home Link</a>'
 
 		>>> synth("div p span a[href=#home] 'Home Link' + a[href=#logout] 'Logout Link'")
-		[<div><p><span><a href="#home">Home Link</a><a href="#logout">Logout Link</a></span></p></div>]
+		'<div><p><span><a href="#home">Home Link</a><a href="#logout">Logout Link</a></span></p></div>'
 
 		>>> synth("div p span 'Here' + + p span 'There'")
-		[<div><p><span>Here</span></p><p><span>There</span></p></div>]
+		'<div><p><span>Here</span></p><p><span>There</span></p></div>'
 
 		>>> synth("div, span")
-		[<div></div>, <span></span>]
+		['<div></div>', '<span></span>']
 
 		>>> synth('div#id1.class1[a=b][k=v], div#id2.class2[href="home, on the range"] "some inner, text" span "span, text" + sub "sub text"')
-		[<div id="id1" class="class1" a="b" k="v"></div>, <div id="id2" class="class2" href=""home, on the range"">some inner, text<span>span, text</span><sub>sub text</sub></div>]
+		['<div id="id1" class="class1" a="b" k="v"></div>', '<div id="id2" class="class2" href=""home, on the range"">some inner, text<span>span, text</span><sub>sub text</sub></div>']
 
 		>>> synth("div#id1.class1[a=b][k=v], div#id2.class2[href='home, on the range'] 'some inner, text' span 'span, text' + sub 'sub text'")
-		[<div id="id1" class="class1" a="b" k="v"></div>, <div id="id2" class="class2" href="'home, on the range'">some inner, text<span>span, text</span><sub>sub text</sub></div>]
+		['<div id="id1" class="class1" a="b" k="v"></div>', '<div id="id2" class="class2" href="\\'home, on the range\\'">some inner, text<span>span, text</span><sub>sub text</sub></div>']
 
 		>>> synth("div#%(id)s")
-		[<div id="%(id)s"></div>]
+		'<div id="%(id)s"></div>'
 
 		>>> synth("div#%(id)s.%(cls)s[%(k)s=%(v)s] '%(data)s'")
-		[<div id="%(id)s" class="%(cls)s" %(k)s="%(v)s">%(data)s</div>]
+		'<div id="%(id)s" class="%(cls)s" %(k)s="%(v)s">%(data)s</div>'
 
 	"""
 	# check the cache first
