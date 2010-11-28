@@ -114,28 +114,31 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", r
 		>>> try: os.makedirs("_test/")
 		... except: pass
 		>>> f = open("_test/included.suba", "w")
-		>>> f.write("This is a special message for %(name)s.")
-		39
+		>>> f.write(\"""%(def upper(x):
+		...		return x.upper())""\")
+		45
+		>>> f.write("This is a special message for %(upper(name))s.")
+		46
 		>>> f.close()
 		>>> ''.join(template(text="<p>%(include('_test/included.suba'))</p>", name="John"))
-		'<p>This is a special message for John.</p>'
+		'<p>This is a special message for JOHN.</p>'
 
 		You can specify a root, a location to find templates, in three ways. (default is '.')
 
 		1. As a keyword argument to template().
 
 		>>> ''.join(template(text="<p>%(include('included.suba'))</p>", root="_test", name="Peter"))
-		'<p>This is a special message for Peter.</p>'
+		'<p>This is a special message for PETER.</p>'
 
 		2. As a regular argument to include() within the template itself.
 
 		>>> ''.join(template(text="<p>%(include('included.suba', '_test'))</p>", name="Paul"))
-		'<p>This is a special message for Paul.</p>'
+		'<p>This is a special message for PAUL.</p>'
 
 		3. As a keyword argument to include() within the template.
 
 		>>> ''.join(template(text="<p>%(include('included.suba', root='_test'))</p>", name="Mary"))
-		'<p>This is a special message for Mary.</p>'
+		'<p>This is a special message for MARY.</p>'
 
 		If the file changes, the cache automatically updates on the next call.
 
@@ -235,7 +238,6 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", r
 		except IndentationError as e:
 			e.filename = filename
 			raise
-		# print("COMPILING:", ast.dump(head, include_attributes=True))
 		_code_cache[h] = compile(head, filename, 'exec')
 
 	## Execution Phase ##
@@ -564,7 +566,7 @@ class Transformer(ast.NodeTransformer):
 				fundef = copy.deepcopy(fundef)
 				_yieldall(fundef.body)
 				for expr in fundef.body:
-					self.generic_visit(expr)
+					self.visit(expr)
 				return fundef.body
 		elif type(node.value) is Yield:
 			y = node.value
