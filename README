@@ -7,7 +7,7 @@ Suba is a fast template engine.  Inspired by python's Mod (%) operator's string 
 
 Example:
 
-> template(text="This is a test of %(who)s.", who="Suba")
+>>> template(text="This is a test of %(who)s.", who="Suba")
 'This is a test of Suba.'
 
 
@@ -15,20 +15,23 @@ Unlike the Mod operator, you can include ANY valid python as the substitution ex
 
 Example:
 
-template(text="These are numbers: %( " ".join((x+x for x in range(1,10))) )")
+>>> template(text="These are numbers: %( " ".join((x+x for x in range(1,10))) )")
 'These are numbers: 2 4 6 8 10 12 14 16 18'
 
-template(text="""
-%(def macro(x):)
-	Line-item: %(x)s
-%/
-%(for i in range(3):)
-	%(macro(i))
-%/
-""")
-'Line-item: 1
-Line-item: 2
-Line-item: 3
+>>> template(text="""
+... %(def macro(x):)
+...		%(x)d. line-item.
+... %/
+... These are some lines:
+... %(for i in range(3):)
+...		%(macro(i))
+... %/
+... """)
+'
+These are lines:
+1. line-item
+2. line-item
+3. line-item
 '
 
 
