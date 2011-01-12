@@ -218,7 +218,14 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", r
 		h = full_name.__hash__()
 		h += os.path.getmtime(full_name)
 	elif filename is None and text is not None:
-		h = text.__hash__()
+		if hasattr(text, "__hash__"):
+			try:
+				h = text.__hash__()
+			except TypeError:
+				print("text", text, type(text))
+				raise
+		else:
+			raise TypeError("Type %s has no __hash__()" % type(text))
 	else:
 		raise ArgumentError("template() requires either text= or filename= arguments.")
 
@@ -785,7 +792,7 @@ def synth(expr):
 		return ret
 	# the buffers to store characters in
 	tagname, id, cls, attr, val, text = [io.StringIO() for _ in range(6)]
-	qmode = None # one of: None, ", or '; represents what the text element is opened/closed with
+	qmode = None # one of: None, ", or ' represents what the text element is opened/closed with
 	attrs = {}
 	parent = None
 	target = tagname
@@ -838,7 +845,7 @@ def synth(expr):
 			attrs = {}
 			target = tagname
 		elif target == tagname:
-			if c != ' ':
+			if c not in (' ', '\r', '\n', '\t'):
 				tagname.write(c)
 		elif target in (id, cls, attr, val, text):
 			target.write(c)
