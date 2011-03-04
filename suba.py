@@ -167,7 +167,7 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", r
 		Traceback (most recent call last):
 			...
 			File "<inline_template>", line 3, in execute
-		ZeroDivisionError: int division or modulo by zero
+		ZeroDivisionError: division by zero
 		
 		TODO: more tests of this line number stuff, such as with includes, etc.
 		TODO: improve the quality of these lineno tests, as doctest doesn't check the stacktrace

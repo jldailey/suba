@@ -1,5 +1,4 @@
 %(def row(x):)
-	x: %(x)s
 	%(if x == 1:)
 		x is 1
 	%(elif x == 2:)
@@ -7,7 +6,9 @@
 	%(else:)
 		x is not 1 or 2
 	%/
+	,
 %/
 %(row(1))
+%(row(2))
 %(row(4))
 
