@@ -1,15 +1,16 @@
+#!/usr/bin/env python3.1
 """
 	Fast template engine, does very simple parsing (no regex, one split) and then generates the AST tree directly.
 	The AST tree is compiled to bytecode and cached (so only the first run of a template must compile).
 	The bytecode cache is in-memory only.
 """
-import re, io, os, ast, builtins, copy, time
+import re, io, os, ast, builtins, copy, time, types
 from ast import *
 
-__all__ = ['template']
+__all__ = ['template', 'synth']
 
 # to get complete compliance with all of python's type specifiers, we use a small regex
-# q, and m, are added by suba
+# q and m, are added by suba
 type_re = re.compile("[0-9.#0+-]*[diouxXeEfFgGcrsqm]")
 
 class FormatError(Exception): pass # fatal, caused by parsing failure, raises to caller
@@ -20,10 +21,13 @@ OPEN_MARK = '%'
 OPEN_PAREN = '('
 CLOSE_PAREN = ')'
 
-MOTION_NONE = 0
-MOTION_ASCEND = 1
-MOTION_DESCEND = 2
-MOTION_ELSE_DESCEND = 3
+# by default a CLOSE_MARK will close 1 body, but in the case of elif, it might need to close more
+ASCEND_COUNT = 1
+
+class NoMotion: pass
+class Ascend: pass
+class Descend: pass
+class ElseDescend: pass
 
 def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", root=".", skipCache=False, **kw):
 	"""
@@ -50,6 +54,11 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", r
 		...
 		'<ul><li>John</li><li>Paul</li><li>Ringo</li></ul>'
 
+		You can use generators.
+
+		>>> ''.join(template(text="...%((str(x) for x in range(1,10)))..."))
+		'...123456789...'
+
 		You can import modules and use them in the template.
 
 		>>> import datetime
@@ -67,28 +76,31 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", r
 		>>> try: os.makedirs("_test/")
 		... except: pass
 		>>> f = open("_test/included.suba", "w")
-		>>> f.write("This is a special message for %(name)s.")
-		39
+		>>> f.write(\"""%(def upper(x):
+		...		return x.upper())""\")
+		45
+		>>> f.write("This is a special message for %(upper(name))s.")
+		46
 		>>> f.close()
 		>>> ''.join(template(text="<p>%(include('_test/included.suba'))</p>", name="John"))
-		'<p>This is a special message for John.</p>'
+		'<p>This is a special message for JOHN.</p>'
 
 		You can specify a root, a location to find templates, in three ways. (default is '.')
 
 		1. As a keyword argument to template().
 
 		>>> ''.join(template(text="<p>%(include('included.suba'))</p>", root="_test", name="Peter"))
-		'<p>This is a special message for Peter.</p>'
+		'<p>This is a special message for PETER.</p>'
 
 		2. As a regular argument to include() within the template itself.
 
 		>>> ''.join(template(text="<p>%(include('included.suba', '_test'))</p>", name="Paul"))
-		'<p>This is a special message for Paul.</p>'
+		'<p>This is a special message for PAUL.</p>'
 
 		3. As a keyword argument to include() within the template.
 
 		>>> ''.join(template(text="<p>%(include('included.suba', root='_test'))</p>", name="Mary"))
-		'<p>This is a special message for Mary.</p>'
+		'<p>This is a special message for MARY.</p>'
 
 		If the file changes, the cache automatically updates on the next call.
 
@@ -188,7 +200,6 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", r
 		except IndentationError as e:
 			e.filename = filename
 			raise
-		# print("COMPILING:", ast.dump(head, include_attributes=True))
 		_code_cache[h] = compile(head, filename, 'exec')
 
 	## Execution Phase ##
@@ -202,16 +213,16 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", r
 	# we pull the first item out, causing the preamble to run, yielding either True, or a ResourceModified exception
 	for err in gen:
 		if err is None:
-			return gen
+			return flatten_gen(gen)
 		if type(err) == ResourceModified:
 			# print("Forcing reload.",str(err))
 			del gen
 			return template(text=text, filename=filename, stripWhitespace=stripWhitespace, encoding=encoding, root=root, skipCache=True, **kw)
 		raise Exception("execute did not return a proper generator, first value was:",err)
 
-
 def compile_ast(text, stripWhitespace=False, encoding=None, transform=True, root=None):
 	"Builds a Module ast tree.	Containing a single function: execute, a generator function."
+	global ASCEND_COUNT
 	head = Module(body=[ 
 		# build the first node of the new code tree
 		# which will be a module with a single function: 'execute', a generator function
@@ -231,9 +242,11 @@ def compile_ast(text, stripWhitespace=False, encoding=None, transform=True, root
 		if motion is Ascend: # Ascend closes a block, such as an if, else, etc.
 			if len(cursor) < 2:
 				raise FormatError("Too many closings tags ('%%/'), cursor: %s" % (cursor, ))
-			# before we ascend, make sure all the Expr's in the about-to-be-closed body are yielding
-			_yieldall(cursor[-1])
-			cursor = cursor[:-1]
+			# as we ascend, make sure all the Expr's in the about-to-be-closed body are yielding
+			for _ in range(ASCEND_COUNT):
+				_yieldall(cursor[-1])
+				cursor = cursor[:-1]
+			ASCEND_COUNT = 1
 		elif motion is Descend: # Descend opens a new block, and puts the cursor inside
 			cursor.append(expr.body) # (if, def, with, try, except, etc. all work this way)
 			del cursor[-1][0] # delete the temporary 'pass' statement
@@ -261,6 +274,7 @@ def compile_ast(text, stripWhitespace=False, encoding=None, transform=True, root
 		# then fill in any missing lineno, col_offsets so that compile() wont complain
 		ast.fix_missing_locations(head)
 
+	# print("COMPILED: ", ast.dump(head))
 	return head
 
 def gen_chunks(text, start=0):
@@ -320,16 +334,11 @@ def gen_chunks(text, start=0):
 			yield OPEN_MARK, None
 			start = i + 1
 
-class NoMotion: pass
-class Ascend: pass
-class Descend: pass
-class ElseDescend: pass
-
 def linecount(t):
 	return max(t.count('\r'),t.count('\n'))
 
 def gen_ast(chunks):
-	""" Given a chunks iterable, yields a series of [<ast>,<motion>] pairs.
+	""" Given an iterable of text chunks, yields a series of [<ast>,<motion>] pairs.
 
 		>>> [ (ast.dump(x),y.__name__) for x,y in gen_ast(gen_chunks("abc%(123)def%g")) ]
 		[("Expr(value=Yield(value=Str(s='abc')))", 'NoMotion'), ("Expr(value=Yield(value=BinOp(left=Str(s='%d'), op=Mod(), right=Num(n=123))))", 'NoMotion'), ("Expr(value=Yield(value=Str(s='ef%g')))", 'NoMotion')]
@@ -342,6 +351,7 @@ def gen_ast(chunks):
 		[("Expr(value=Yield(value=Str(s='/*comment*/')))", 'NoMotion'), ("Expr(value=Str(s='foo'))", 'NoMotion')]
 
 	"""
+	global ASCEND_COUNT
 	stack = []
 	lineno = 1
 	# a closure to assign the lineno to all nodes
@@ -398,6 +408,7 @@ def gen_ast(chunks):
 					yield None, ElseDescend # yield an immediate else descend
 					eval_part = eval_part[2:] # chop off the 'el' so we parse as a regular 'if' statement
 					motion = Descend # then the 'if' statement from this line will descend regularly
+					ASCEND_COUNT += 1
 				try: # parse the eval_part
 					body = ast.parse(eval_part).body
 					if len(body) > 0: # a block with no expressions (e.g., it was all comments) will have no nodes and can be skipped
@@ -517,7 +528,7 @@ class Transformer(ast.NodeTransformer):
 				fundef = copy.deepcopy(fundef)
 				_yieldall(fundef.body)
 				for expr in fundef.body:
-					self.generic_visit(expr)
+					self.visit(expr)
 				return fundef.body
 		elif type(node.value) is Yield:
 			y = node.value
@@ -575,6 +586,26 @@ class Transformer(ast.NodeTransformer):
 		else: # is Load, but a local variable
 			return node
 
+	def visit_GeneratorExp(self, node):
+		# generator expressions define the variables "out-of-order"
+		# if you say: (x for x in iter), the creation of x appears
+		# "after" the access of x, in text order, so we have to tweak
+		# the generic visit, to visit the creations first, so we dont
+		# try to replace x with args[x]
+		for g in node.generators:
+			self.generic_visit(g)
+		self.generic_visit(node.elt)
+		return node
+
+
+def flatten_gen(gen):
+	for i in gen:
+		if type(i) is types.GeneratorType:
+			for j in i:
+				yield j
+		else:
+			yield i
+
 def strip_whitespace(s):
 	out = io.StringIO()
 	remove = False
@@ -616,6 +647,7 @@ def _multiline(node):
 	""" node.replace('\n','\\n') """
 	return Expr(value=_call(_replace(node), [Str(s='\n'),Str(s="\\\n")]))
 def _compareMtime(full_name, mtime):
+	""" os.path.getmtime(full_name) > mtime """
 	return Compare(left=Call(func=Attribute(value=Attribute(value=Name(id='os', ctx=Load(), lineno=0), attr='path', ctx=Load()), 
 		attr='getmtime', ctx=Load()), args=[Str(s=full_name)], keywords=[], starargs=None, kwargs=None), 
 		ops=[Gt()], 
@@ -635,6 +667,164 @@ def _yieldall(body):
 			if type(expr.value) != Yield and not (type(expr.value) is Call and type(expr.value.func) is Name and expr.value.func.id is 'include'):
 				new = Yield(value=expr.value)
 				body[i].value = ast.copy_location(new, expr.value)
+
+# the absolute bare minimum idea of a DOM node
+# a structure used for building a tree and dumping a string
+class Node:
+	def __init__(self, tagName):
+		self.tagName = tagName
+		self.parentNode = None
+		self.id = None
+		self.className = None
+		self.attrs = {}
+		self.childNodes = []
+	def setAttribute(self, k, v):
+		self.attrs[k] = v
+	def appendChild(self, n):
+		self.childNodes.append(n)
+		n.parentNode = self
+		return n
+	def __str__(self):
+		return "<%(tagName)s%(id)s%(cls)s%(attrs)s>%(children)s</%(tagName)s>" % {
+			'tagName': self.tagName,
+			'id':' id="%s"' % self.id if self.id else "",
+			'cls':' class="%s"' % self.className if self.className else "",
+			'attrs':"".join([' %s="%s"' % (k,v) for k,v in self.attrs.items()]),
+			'children':"".join([str(child) for child in self.childNodes]),
+		}
+	def __repr__(self):
+		return str(self)
+
+class TextNode:
+	def __init__(self, text):
+		self.text = text
+	def __str__(self):
+		return self.text
+	def __repr__(self):
+		return self.text
+
+_synth_cache = {}
+def synth(expr):
+	""" A state-machine parser for generating Nodes from CSS expressions. 
+
+		>>> synth("div#foo")
+		'<div id="foo"></div>'
+
+		>>> synth("div.bar")
+		'<div class="bar"></div>'
+
+		>>> synth("a[href=#home]")
+		'<a href="#home"></a>'
+
+		>>> synth("a[href=#home] 'Home Link'")
+		'<a href="#home">Home Link</a>'
+
+		>>> synth("div p span a[href=#home] 'Home Link' + a[href=#logout] 'Logout Link'")
+		'<div><p><span><a href="#home">Home Link</a><a href="#logout">Logout Link</a></span></p></div>'
+
+		>>> synth("div p span 'Here' + + p span 'There'")
+		'<div><p><span>Here</span></p><p><span>There</span></p></div>'
+
+		>>> synth("div, span")
+		['<div></div>', '<span></span>']
+
+		>>> synth('div#id1.class1[a=b][k=v], div#id2.class2[href="home, on the range"] "some inner, text" span "span, text" + sub "sub text"')
+		['<div id="id1" class="class1" a="b" k="v"></div>', '<div id="id2" class="class2" href=""home, on the range"">some inner, text<span>span, text</span><sub>sub text</sub></div>']
+
+		>>> synth("div#id1.class1[a=b][k=v], div#id2.class2[href='home, on the range'] 'some inner, text' span 'span, text' + sub 'sub text'")
+		['<div id="id1" class="class1" a="b" k="v"></div>', '<div id="id2" class="class2" href="\\'home, on the range\\'">some inner, text<span>span, text</span><sub>sub text</sub></div>']
+
+		>>> synth("div#%(id)s")
+		'<div id="%(id)s"></div>'
+
+		>>> synth("div#%(id)s.%(cls)s[%(k)s=%(v)s] '%(data)s'")
+		'<div id="%(id)s" class="%(cls)s" %(k)s="%(v)s">%(data)s</div>'
+
+	"""
+	# check the cache first
+	ret = _synth_cache.get(expr, [])
+	if len(ret) > 0:
+		return ret
+	# the buffers to store characters in
+	tagname, id, cls, attr, val, text = [io.StringIO() for _ in range(6)]
+	qmode = None # one of: None, ", or '; represents what the text element is opened/closed with
+	attrs = {}
+	parent = None
+	target = tagname
+	# feed each character to the machine
+	for c in expr:
+		# print(c, target, parent)
+		if c == '+' and target in (tagname,):
+			if parent is not None:
+				parent = parent.parentNode
+		elif c == '#' and target in (tagname,cls,attr):
+			target = id
+		elif c == '.' and target in (tagname,id,attr):
+			target = cls
+		elif c == '[' and target in (tagname,id,cls,attr):
+			target = attr
+		elif c == '=' and target in (attr,):
+			target = val
+		elif c == ']' and target in (attr, val):
+			attrs[attr.getvalue()] = val.getvalue()
+			[(x.truncate(0) | x.seek(0,2)) for x in (attr, val)]
+			target = tagname
+		elif c in ('"',"'") and target in (tagname,):
+			target = text
+			qmode = c
+		elif c == qmode and target in (text,):
+			node = TextNode(text.getvalue())
+			if parent is not None:
+				parent.appendChild(node)
+			else:
+				ret.append(node)
+			target = tagname
+			text.truncate(0)
+			text.seek(0,2)
+			qmode = None
+		elif c in (' ', ',') and target not in (val, text) and tagname.tell() > 0:
+			node = Node(tagname.getvalue())
+			node.id = id.getvalue()
+			node.className = cls.getvalue()
+			node.attrs = attrs
+			if parent is not None:
+				parent.appendChild(node)
+			else:
+				ret.append(node)
+			if c == ',':
+				parent = None
+			elif c == ' ':
+				parent = node
+			[(x.truncate(0) | x.seek(0,2)) \
+				for x in (tagname, id, cls, attr, val, text)]
+			attrs = {}
+			target = tagname
+		elif target == tagname:
+			if c != ' ':
+				tagname.write(c)
+		elif target in (id, cls, attr, val, text):
+			target.write(c)
+		else:
+			raise ParseError("Undefined input/state: '%s'/%s" % (c,target))
+	if tagname.tell() > 0:
+		node = Node(tagname.getvalue())
+		node.id = id.getvalue()
+		node.className = cls.getvalue()
+		node.attrs = attrs
+		if parent is not None:
+			parent.appendChild(node)
+		else:
+			ret.append(node)
+	if text.tell() > 0:
+		node = TextNode(text.getvalue())
+		if parent is not None:
+			parent.appendChild(node)
+		else:
+			ret.append(node)
+	if len(ret) == 1:
+		return str(ret[0])
+	return [str(x) for x in ret]
+
 
 if __name__ == "__main__":
 	import doctest

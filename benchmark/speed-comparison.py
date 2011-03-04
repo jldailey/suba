@@ -1,4 +1,6 @@
-import time, os, random
+#!/usr/bin/env python3.1
+import time, os, random, sys
+sys.path.insert(0, "..")
 import tenjin
 from tenjin.helpers import to_str # these must be global for tenjin to work
 N = 10000
@@ -29,21 +31,21 @@ items = [
 def suba_test(N):
 	from suba import template # count the one-time import cost
 	for i in range(N):
-		ret = ''.join(template(filename="bench_suba.tpl", base_path="benchmark", stripWhitespace=False, 
+		ret = ''.join(template(filename="bench_suba.tpl", base_path=".", stripWhitespace=False, 
 			items = items, name="Suba"))
 
 def tenjin_test(N):
-	engine = tenjin.Engine(cache=True, path=['benchmark']) # count the one time creation cost of the engine
+	engine = tenjin.Engine(cache=True, path=['.']) # count the one time creation cost of the engine
 	for i in range(N):
 		ret = engine.render('bench_tenjin.pyhtml', { 'list': items, 'name': "Tenjin" })
 	elapsed = (time.time() - start)
-	os.unlink('benchmark/bench_tenjin.pyhtml.cache')
-	os.unlink('benchmark/_header.html.cache')
-	os.unlink('benchmark/_footer.html.cache')
+	os.unlink('./bench_tenjin.pyhtml.cache')
+	os.unlink('./_header.html.cache')
+	os.unlink('./_footer.html.cache')
 
 def evoque_test(N):
 	from evoque.template import Template
-	t = Template(os.path.sep.join([os.getcwd(), "benchmark"]), "bench_evoque.html", quoting="str")
+	t = Template(os.path.sep.join([os.getcwd(), "."]), "bench_evoque.html", quoting="str")
 	for _ in range(N):
 		(t.evoque({ 'items': items, 'name': "Evoque" }))
 
