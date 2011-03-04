@@ -1,4 +1,4 @@
 <ul>
 	%(n = 1)
-	<li class="%('odd' if n%2 else 'even' )">%(n)</li>
+	<li class="%('odd' if n%2 else 'even' )">%(n)d</li>
 </ul>

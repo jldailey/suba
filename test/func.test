@@ -1,0 +1,5 @@
+%(def row(x):)
+	x is %(x)s
+%/
+%(row(1))
+%(row(2))

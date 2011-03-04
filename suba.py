@@ -38,27 +38,6 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", r
 		>>> ''.join(template(text="<p>%(name)s</p>", name="John"))
 		'<p>John</p>'
 
-		The 'm' type specifier will escape multiline strings.
-
-		>>> ''.join(template(text="%(foo)m", foo=""\"Line 1:
-		... Line 2:
-		... Line 3:\"""))
-		'Line 1:\\\\\\nLine 2:\\\\\\nLine 3:'
-
-		The 'q' type specifier will escape quotation marks within the value.
-
-		>>> value = '"Halt!"'
-		>>> ''.join(template(text="%(value)q, the guard shouted.", value=value))
-		'\\\\"Halt!\\\\", the guard shouted.'
-
-
-		>>> with open("_test_file_", "w") as f:
-		...		f.write("<p>%(name)s</p>")
-		15
-		>>> ''.join(template(filename="_test_file_", name="Jacob"))
-		'<p>Jacob</p>'
-		>>> os.unlink("_test_file_")
-
 		The more advanced syntax is just embedded python, with one rule for handling indents:
 		 - Lines that end in ':' increase the indent of all following statements until a %/ is reached.
 
@@ -70,23 +49,6 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", r
 		...	</ul>""\", items=["John", "Paul", "Ringo"], stripWhitespace=True))
 		...
 		'<ul><li>John</li><li>Paul</li><li>Ringo</li></ul>'
-
-		Tests for if, else, elif.
-
-		>>> t = \"""
-		...	%(if foo:)
-		... foo is true
-		... %(elif bar:)
-		... bar is true
-		... %(else:)
-		... nothing is true
-		... %/\"""
-		>>> ''.join(template(text=t, foo=False, bar=False, stripWhitespace=True))
-		'nothing is true'
-		>>> ''.join(template(text=t, foo=True, bar=False, stripWhitespace=True))
-		'foo is true'
-		>>> ''.join(template(text=t, foo=False, bar=True, stripWhitespace=True))
-		'bar is true'
 
 		You can import modules and use them in the template.
 

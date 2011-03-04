@@ -1,3 +1,1 @@
-%(include("include.inc"))
-<between>
-%(include("include.inc"))
+%(include("include.inc"))<between>%(include("include.inc"))

@@ -9,7 +9,7 @@ for file in os.listdir("test"):
 	if file.endswith(".test"):
 		if test_to_run is None or file.startswith(test_to_run):
 			try:
-				output = ''.join(template(filename=file, base_path="test", stripWhitespace=True, names = ['John','Paul','Ringo']))
+				output = ''.join(template(filename=file, root="test", stripWhitespace=True, names = ['John','Paul','Ringo']))
 			except Exception as e:
 				output = str(e)
 				if test_to_run is not None:

@@ -1,0 +1,2 @@
+%(import datetime)
+now is: %(datetime.datetime.strptime('12/10/2001','%d/%m/%Y').strftime('%d/%m/%y'))s
