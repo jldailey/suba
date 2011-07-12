@@ -11,7 +11,7 @@ Inspired by python's Mod (%) operator's string substitution.
 
 Unlike the Mod operator, you can include ANY valid python as the substitution expression, not just key names.
 
->>> template(text="These are numbers: %( " ".join((x+x for x in range(1,10))) )")
+>>> template(text="These are numbers: %( " ".join((x+x for x in range(1,10))) )s")
 'These are numbers: 2 4 6 8 10 12 14 16 18'
 
 See the extensive doctests in suba.py, and the test/ folder.

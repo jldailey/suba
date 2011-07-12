@@ -24,6 +24,7 @@ CLOSE_PAREN = ')'
 # by default a CLOSE_MARK will close 1 body, but in the case of elif, it might need to close more
 ASCEND_COUNT = 1
 
+# these are value-less tokens
 class NoMotion: pass
 class Ascend: pass
 class Descend: pass
@@ -205,7 +206,7 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", r
 		Traceback (most recent call last):
 			...
 			File "<inline_template>", line 3, in execute
-		ZeroDivisionError: int division or modulo by zero
+		ZeroDivisionError: division by zero
 		
 		TODO: more tests of this line number stuff, such as with includes, etc.
 		TODO: improve the quality of these lineno tests, as doctest doesn't check the stacktrace
@@ -674,7 +675,7 @@ def include_ast(filename, root=None):
 	if _code_cache.get(h,None) is None:
 		with open(full_name) as f:
 			module = compile_ast(f.read(), transform=False)
-			fundef = module.body[0] # the only element of the Module's body, is the function defintion
+			fundef = module.body[0] # cache the only element of the included Module's body, the function defintion
 			_code_cache[h] = fundef
 	return _checkMtimeAndYield(full_name, m), _code_cache[h]
 
