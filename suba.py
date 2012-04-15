@@ -24,6 +24,7 @@ CLOSE_PAREN = ')'
 # by default a CLOSE_MARK will close 1 body, but in the case of elif, it might need to close more
 ASCEND_COUNT = 1
 
+# these are value-less tokens
 class NoMotion: pass
 class Ascend: pass
 class Descend: pass
@@ -180,7 +181,14 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", r
 		h = full_name.__hash__()
 		h += os.path.getmtime(full_name)
 	elif filename is None and text is not None:
-		h = text.__hash__()
+		if hasattr(text, "__hash__"):
+			try:
+				h = text.__hash__()
+			except TypeError:
+				print("text", text, type(text))
+				raise
+		else:
+			raise TypeError("Type %s has no __hash__()" % type(text))
 	else:
 		raise ArgumentError("template() requires either text= or filename= arguments.")
 
@@ -630,7 +638,7 @@ def include_ast(filename, root=None):
 	if _code_cache.get(h,None) is None:
 		with open(full_name) as f:
 			module = compile_ast(f.read(), transform=False)
-			fundef = module.body[0] # the only element of the Module's body, is the function defintion
+			fundef = module.body[0] # cache the only element of the included Module's body, the function defintion
 			_code_cache[h] = fundef
 	return _checkMtimeAndYield(full_name, m), _code_cache[h]
 
@@ -748,7 +756,7 @@ def synth(expr):
 		return ret
 	# the buffers to store characters in
 	tagname, id, cls, attr, val, text = [io.StringIO() for _ in range(6)]
-	qmode = None # one of: None, ", or '; represents what the text element is opened/closed with
+	qmode = None # one of: None, ", or ' represents what the text element is opened/closed with
 	attrs = {}
 	parent = None
 	target = tagname
@@ -801,7 +809,7 @@ def synth(expr):
 			attrs = {}
 			target = tagname
 		elif target == tagname:
-			if c != ' ':
+			if c not in (' ', '\r', '\n', '\t'):
 				tagname.write(c)
 		elif target in (id, cls, attr, val, text):
 			target.write(c)

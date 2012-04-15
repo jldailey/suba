@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.1
+#!/usr/bin/env python3
 import time, os, random, sys
 sys.path.insert(0, "..")
 import tenjin

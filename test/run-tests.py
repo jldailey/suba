@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.1
+#!/usr/bin/env python3
 import os, sys
 sys.path.insert(0,"..")
 from suba import template
