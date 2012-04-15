@@ -599,8 +599,9 @@ class Transformer(ast.NodeTransformer):
 
 
 def flatten_gen(gen):
+	generator = types.GeneratorType
 	for i in gen:
-		if type(i) is types.GeneratorType:
+		if type(i) is generator:
 			for j in i:
 				yield j
 		else:
