@@ -20,11 +20,34 @@ CLOSE_MARK = '/'
 OPEN_MARK = '%'
 OPEN_PAREN = '('
 CLOSE_PAREN = ')'
+# lexed token
+class Token(str): pass
+class CloseMark(Token): pass
+class OpenMark(Token): pass
+class OpenParen(Token): pass
+class CloseParen(Token): pass
+class TextToken(Token): pass
+class ExprToken():
+	def __init__(self, text, spec=""):
+		self.text = text
+		self.spec = spec
+	def __str__(self):
+		return self.text
+	def endswith(self, v):
+		return self.text.endswith(v)
+	def startswith(self, v):
+		return self.text.startswith(v)
+	def count(self, v):
+		return self.text.count(v)
+	def __len__(self):
+		return len(self.text)
+	def __getitem__(self, i):
+		return self.text[i]
 
 # by default a CLOSE_MARK will close 1 body, but in the case of elif, it might need to close more
 ASCEND_COUNT = 1
 
-# these are value-less tokens
+# motion tokens
 class NoMotion: pass
 class Ascend: pass
 class Descend: pass
@@ -169,7 +192,7 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", r
 			...
 			File "<inline_template>", line 3, in execute
 		ZeroDivisionError: division by zero
-		
+
 		TODO: more tests of this line number stuff, such as with includes, etc.
 		TODO: improve the quality of these lineno tests, as doctest doesn't check the stacktrace
 	"""
@@ -223,7 +246,7 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", r
 		if err is None:
 			return flatten_gen(gen)
 		if type(err) == ResourceModified:
-			# print("Forcing reload.",str(err))
+			# Forcing reload.
 			del gen
 			return template(text=text, filename=filename, stripWhitespace=stripWhitespace, encoding=encoding, root=root, skipCache=True, **kw)
 		raise Exception("execute did not return a proper generator, first value was:",err)
@@ -231,17 +254,17 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", r
 def compile_ast(text, stripWhitespace=False, encoding=None, transform=True, root=None):
 	"Builds a Module ast tree.	Containing a single function: execute, a generator function."
 	global ASCEND_COUNT
-	head = Module(body=[ 
+	head = Module(body=[
 		# build the first node of the new code tree
 		# which will be a module with a single function: 'execute', a generator function
-		FunctionDef(name='execute', args=arguments(args=[], vararg=None, varargannotation=None, kwonlyargs=[], 
-				kwarg='args', kwargannotation=None, defaults=[], kw_defaults=[]), 
+		FunctionDef(name='execute', args=arguments(args=[], vararg=None, varargannotation=None, kwonlyargs=[],
+				kwarg='args', kwargannotation=None, defaults=[], kw_defaults=[]),
 			body=[], decorator_list=[], returns=None, lineno=0),
 		],lineno=0)
 	cursor = [] # a stack
 	cursor.append(head.body[0].body)
 	# gets a series of ast,motion pairs from the gen_ast generator
-	for expr, motion in gen_ast(gen_chunks(text)):
+	for expr, motion in gen_ast(gen_tokens(text)):
 		# print("expr: %s motion: %s" % (expr, motion))
 		if expr is not None: # add the ast node to the tree
 			cursor[-1].append(expr)
@@ -285,44 +308,15 @@ def compile_ast(text, stripWhitespace=False, encoding=None, transform=True, root
 	# print("COMPILED: ", ast.dump(head))
 	return head
 
-def gen_chunks(text, start=0):
-	"""A generator that does lexing for our parser. Yields <text>,<type> pairs.
-
-		>>> list(gen_chunks("abc%(123)def%g"))
-		[('abc', None), ('(123)', 'd'), ('ef', None), ('%', None), ('g', None)]
-
-		>>> list(gen_chunks("abc%()def%g"))
-		[('abc', None), ('()', 'd'), ('ef', None), ('%', None), ('g', None)]
-
-		>>> list(gen_chunks("abc%()def%%g"))
-		[('abc', None), ('()', 'd'), ('ef', None), ('%', None), ('', None), ('%', None), ('g', None)]
-
-		>>> list(gen_chunks("abc%(print('%s'))sef%%g"))
-		[('abc', None), ("(print('%s'))", 's'), ('ef', None), ('%', None), ('', None), ('%', None), ('g', None)]
-
-		>>> list(gen_chunks("<ul>%(for item in items:)<li>%(item)s</li>%/</ul>"))
-		[('<ul>', None), ('(for item in items:)', None), ('<li>', None), ('(item)', 's'), ('</li>', None), ('/', None), ('</ul>', None)]
-
-		Test for a parse error condition
-
-		>>> list(gen_chunks("<ul>%(for item in items:)<li>%(item)s</li>%//</ul>"))
-		[('<ul>', None), ('(for item in items:)', None), ('<li>', None), ('(item)', 's'), ('</li>', None), ('/', None), ('/</ul>', None)]
-
-		>>> list(gen_chunks("/<ul>%(for item in items:)<li>%(item)s</li>%//</ul>"))
-		[('/<ul>', None), ('(for item in items:)', None), ('<li>', None), ('(item)', 's'), ('</li>', None), ('/', None), ('/</ul>', None)]
-
-		>>> list(gen_chunks("(<ul>%(for item in items:)<li>%(item)s</li>%//</ul>"))
-		[('(<ul>', None), ('(for item in items:)', None), ('<li>', None), ('(item)', 's'), ('</li>', None), ('/', None), ('/</ul>', None)]
-
-	"""
+def gen_tokens(text, start=0):
+	"""A generator that does lexing for our parser. Yields Tokens."""
 
 	while -1 < start < len(text):
 		i = text.find(OPEN_MARK,start)
-		# print("i = %d, text[...] = %s" % (i, text[i-3:i+4]))
 		if i == -1:
-			yield text[start:], None
+			yield TextToken(text[start:])
 			break
-		yield text[start:i], None
+		yield TextToken(text[start:i])
 		if text[i+1] == OPEN_PAREN:
 			m = match_forward(text, CLOSE_PAREN, OPEN_PAREN, start=i+2)
 			if m == -1:
@@ -334,28 +328,27 @@ def gen_chunks(text, start=0):
 			if ma is not None:
 				type_part = ma.group(0)
 				start += len(type_part)
-			yield text[i+1:m+1], type_part
+			yield ExprToken(text[i+2:m], type_part)
 		elif text[i+1] == CLOSE_MARK:
-			yield CLOSE_MARK, None
+			yield CloseMark()
 			start = i + 2
 		else:
-			yield OPEN_MARK, None
+			yield OpenMark()
 			start = i + 1
 
 def linecount(t):
 	return max(t.count('\r'),t.count('\n'))
 
-def gen_ast(chunks):
-	""" Given an iterable of text chunks, yields a series of [<ast>,<motion>] pairs.
+def gen_ast(tokens):
+	""" Given an iterable of tokens, yields a series of [<ast>,<motion>] pairs.
 
-		>>> [ (ast.dump(x),y.__name__) for x,y in gen_ast(gen_chunks("abc%(123)def%g")) ]
+		>>> [ (ast.dump(x),y.__name__) for x,y in gen_ast(gen_tokens("abc%(123)def%g")) ]
 		[("Expr(value=Yield(value=Str(s='abc')))", 'NoMotion'), ("Expr(value=Yield(value=BinOp(left=Str(s='%d'), op=Mod(), right=Num(n=123))))", 'NoMotion'), ("Expr(value=Yield(value=Str(s='ef%g')))", 'NoMotion')]
 
-		>>> list(gen_chunks("/*comment*/%(for i in range(1):) foo%//*comment2*/"))
+		>>> list(gen_tokens("/*comment*/%(for i in range(1):) foo%//*comment2*/"))
 		[('/*comment*/', None), ('(for i in range(1):)', None), (' foo', None), ('/', None), ('/*comment2*/', None)]
-	
 
-		>>> [ (ast.dump(x),y.__name__) for x,y in gen_ast(gen_chunks("/*comment*/%('foo')")) ]
+		>>> [ (ast.dump(x),y.__name__) for x,y in gen_ast(gen_tokens("/*comment*/%('foo')")) ]
 		[("Expr(value=Yield(value=Str(s='/*comment*/')))", 'NoMotion'), ("Expr(value=Str(s='foo'))", 'NoMotion')]
 
 	"""
@@ -370,16 +363,13 @@ def gen_ast(chunks):
 				node.col_offset = 0
 		return n
 
-	for chunk, type_part in chunks:
-
-		# ignore empty chunks
-		if len(chunk) == 0:
-			continue
+	for token in tokens:
 
 		# if it's a plain piece of text
-		if chunk[0] not in (CLOSE_MARK, OPEN_PAREN):
-			stack.append(chunk) # stack it up for later
-			continue # get the next chunk
+		if isinstance(token, TextToken):
+			if len(token) > 0:
+				stack.append(token) # stack it up
+			continue # get the next token
 		# otherwise, it is something we will need to eval
 
 		# yield all text on the stack before proceeding
@@ -391,73 +381,71 @@ def gen_ast(chunks):
 			stack = []
 
 		# if it's a close marker
-		if chunk == CLOSE_MARK:
+		if isinstance(token, CloseMark):
 			# yield the Ascend motion for the cursor
 			yield None, Ascend
-			# and if there is any text after the close
-			if len(chunk) > 1:
-				stack.append(chunk[1:]) # stack it for later
-
-		elif chunk[0] == OPEN_PAREN:
+		elif isinstance(token, ExprToken):
 			# set up the default node, motion we will yield based on what we find inside this OPEN_PAREN
 			node = None
 			motion = NoMotion
-			# eval the middle (without the parens)
-			eval_part = chunk[1:-1]
 			# if the statement to eval is like an if, while, or for, then we need to do some tricks
-			if eval_part.endswith(":"):
-				eval_part += " pass" # add a temp. node, so we can parse the incomplete statement
+			if token.endswith(":"):
 				motion = Descend
 
-			if eval_part.startswith("else:"):
+			if token.startswith("else:"):
 				motion = ElseDescend
 			else:
-				if eval_part.startswith("elif "):
+				if token.startswith("elif "):
 					yield None, ElseDescend # yield an immediate else descend
-					eval_part = eval_part[2:] # chop off the 'el' so we parse as a regular 'if' statement
+					token = ExprToken(token.text[2:], token.spec) # chop off the 'el' so we parse as a regular 'if' statement
 					motion = Descend # then the 'if' statement from this line will descend regularly
 					ASCEND_COUNT += 1
-				try: # parse the eval_part
-					body = ast.parse(eval_part).body
+				try: # parse the token
+					toparse = str(token)
+					if motion is Descend:
+						toparse += " pass" # make it parse-able without the body
+					body = ast.parse(toparse).body
 					if len(body) > 0: # a block with no expressions (e.g., it was all comments) will have no nodes and can be skipped
-						node = body[0]
-						node = locate(node)
+						node = locate(body[0])
 				except IndentationError as e: # fix up indentation errors to make sure they indicate the right spot in the actual template file
-					e.lineno += lineno - linecount(eval_part)
+					e.lineno += lineno - linecount(token)
 					e.offset += 1 # should be 1 + (space between left margin and opening %), but i dont know how to count this atm
 					raise
 				except Exception as e:
-					e.lineno += lineno - linecount(eval_part)
-					e.offset += 1
-					raise Exception("Error while parsing sub-expression: %s, %s" % (eval_part, str(e)), e)
+					try:
+						e.lineno += lineno - linecount(token)
+						e.offset += 1
+					except:
+						pass
+					raise Exception("Error while parsing sub-expression: %s, %s" % (token, str(e)), e)
 
-				# if this eval_part had a type_part attached (a conversion specifier as recognized by the % operator)
+				# if this token had a spec attached (a conversion specifier as recognized by the % operator)
 				# then wrap the node in a call to the % operator with this type specifier
-				if type_part is not None:
+				if token.spec is not None:
 					# you can't give a type on a node with no value
 					if not hasattr(node, 'value'):
 						# so just put the type_part on the stack as regular text to be yielded
-						stack.append(type_part)
+						stack.append(token.spec)
 					else:
 						# q and m are special modifiers used only in suba
-						fq = type_part.find('q')
-						fm = type_part.find('m')
+						fq = token.spec.find('q')
+						fm = token.spec.find('m')
 						if fq > -1:
 							new = _quote(node.value)
 							node = ast.copy_location(new, node.value)
 						if fm > -1:
 							new = _multiline(node.value)
 							node = ast.copy_location(new, node.value)
-						# for the default types, just pass the type_part on to the Mod operator
+						# for the default types, just pass the token.spec on to the Mod operator
 						if fq == -1 and fm == -1:
-							new = Expr(value=Yield(value=BinOp(left=Str(s='%'+type_part), op=Mod(), right=node.value)))
+							new = Expr(value=Yield(value=BinOp(left=Str(s='%'+token.spec), op=Mod(), right=node.value)))
 							node = ast.copy_location(new, node.value)
 
 			# yield the parsed node
 			# print("gen_ast:", ast.dump(node, include_attributes=True))
 			yield node, motion
 		else:
-			stack.append(chunk)
+			stack.append(token)
 
 	if len(stack) > 0:
 		# yield the remaining text
@@ -466,6 +454,10 @@ def gen_ast(chunks):
 def gen_bytes(gen, encoding):
 	for item in gen:
 		yield bytes(str(item), encoding)
+
+def gen_str(gen):
+	for item in gen:
+		yield str(item)
 
 def match_forward(text, find, against, start=0, stop=-1):
 	"""This will find the index of the closing parantheses.
@@ -503,7 +495,7 @@ class Transformer(ast.NodeTransformer):
 		"""
 		if type(node.value) is Call:
 			call = node.value
-			if type(call.func) is Name and call.func.id == 'include': 
+			if type(call.func) is Name and call.func.id == 'include':
 				if len(call.args) < 1:
 					raise FormatError("include requires at least a filename as an argument.")
 				root = None
@@ -605,15 +597,14 @@ class Transformer(ast.NodeTransformer):
 		self.generic_visit(node.elt)
 		return node
 
-
 def flatten_gen(gen):
 	generator = types.GeneratorType
 	for i in gen:
 		if type(i) is generator:
 			for j in i:
-				yield j
+				yield str(j)
 		else:
-			yield i
+			yield str(i)
 
 def strip_whitespace(s):
 	out = io.StringIO()
@@ -642,7 +633,7 @@ def include_ast(filename, root=None):
 			_code_cache[h] = fundef
 	return _checkMtimeAndYield(full_name, m), _code_cache[h]
 
-# these are quick utils for building chunks of ast
+# these are quick utils for building ast
 def _call(func,args):
 	""" func(args) """
 	return Call(func=func, args=args, keywords=[], starargs=None,kwargs=None)
@@ -657,16 +648,16 @@ def _multiline(node):
 	return Expr(value=_call(_replace(node), [Str(s='\n'),Str(s="\\\n")]))
 def _compareMtime(full_name, mtime):
 	""" os.path.getmtime(full_name) > mtime """
-	return Compare(left=Call(func=Attribute(value=Attribute(value=Name(id='os', ctx=Load(), lineno=0), attr='path', ctx=Load()), 
-		attr='getmtime', ctx=Load()), args=[Str(s=full_name)], keywords=[], starargs=None, kwargs=None), 
-		ops=[Gt()], 
+	return Compare(left=Call(func=Attribute(value=Attribute(value=Name(id='os', ctx=Load(), lineno=0), attr='path', ctx=Load()),
+		attr='getmtime', ctx=Load()), args=[Str(s=full_name)], keywords=[], starargs=None, kwargs=None),
+		ops=[Gt()],
 		comparators=[Num(n=mtime)])
 def _checkMtimeAndYield(full_name, mtime):
 	""" if os.path.getmtime(full_name) > mtime:
 		yield ResourceModified(full_name)
 	""" # static checks like this are compiled into the top of include trees
 	return If(test=_compareMtime(full_name, mtime), body=[
-		Expr(value=Yield(value=Call(func=Name(id='ResourceModified', ctx=Load(), lineno=0), 
+		Expr(value=Yield(value=Call(func=Name(id='ResourceModified', ctx=Load(), lineno=0),
 			args=[Str(s=full_name)], keywords=[], starargs=None, kwargs=None)))
 	], orelse=[])
 def _yieldall(body):
@@ -714,7 +705,7 @@ class TextNode:
 
 _synth_cache = {}
 def synth(expr):
-	""" A state-machine parser for generating Nodes from CSS expressions. 
+	""" A state-machine parser for generating html from CSS expressions.
 
 		>>> synth("div#foo")
 		'<div id="foo"></div>'
@@ -836,5 +827,6 @@ def synth(expr):
 
 
 if __name__ == "__main__":
-	import doctest
-	doctest.testmod(raise_on_error=False)
+	import sys
+	arg = ' '.join(sys.argv[1:])
+	print(''.join(template(arg, foo="bar")))
