@@ -231,7 +231,7 @@ def template(text=None, filename=None, stripWhitespace=False, encoding="utf8", r
 		except IndentationError as e:
 			e.filename = filename
 			raise
-		_code_cache[h] = compile(head, filename, 'exec')
+		_code_cache[h] = compile(head, filename, 'exec', 0)
 
 	## Execution Phase ##
 	# provide a few global helpers and then execute the cached byte code
@@ -257,10 +257,10 @@ def compile_ast(text, stripWhitespace=False, encoding=None, transform=True, root
 	head = Module(body=[
 		# build the first node of the new code tree
 		# which will be a module with a single function: 'execute', a generator function
-		FunctionDef(name='execute', args=arguments(args=[], vararg=None, varargannotation=None, kwonlyargs=[],
-				kwarg='args', kwargannotation=None, defaults=[], kw_defaults=[]),
-			body=[], decorator_list=[], returns=None, lineno=0),
-		],lineno=0)
+		FunctionDef(name='execute', args=arguments(args=[], vararg=None, kwonlyargs=[], kw_defaults=[], kwarg=arg(arg='args', annotation=None), defaults=[]),
+			body=[], decorator_list=[], returns=None, lineno=0)
+	])
+
 	cursor = [] # a stack
 	cursor.append(head.body[0].body)
 	# gets a series of ast,motion pairs from the gen_ast generator
@@ -824,7 +824,6 @@ def synth(expr):
 	if len(ret) == 1:
 		return str(ret[0])
 	return [str(x) for x in ret]
-
 
 if __name__ == "__main__":
 	import sys
